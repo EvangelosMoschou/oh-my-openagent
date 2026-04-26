@@ -5,6 +5,8 @@ import {
   isGeminiModel,
   isGpt5_5Model,
   isGptNativeSisyphusModel,
+  isDeepSeekV4Model,
+  isDeepSeekV4ProModel,
   isClaudeOpus47Model,
   isKimiK2Model,
 } from "./types";
@@ -20,6 +22,7 @@ import { buildClaudeOpus47SisyphusPrompt } from "./sisyphus/claude-opus-4-7";
 import { buildGpt54SisyphusPrompt } from "./sisyphus/gpt-5-4";
 import { buildGpt55SisyphusPrompt } from "./sisyphus/gpt-5-5";
 import { buildKimiK26SisyphusPrompt } from "./sisyphus/kimi-k2-6";
+import { buildDeepSeekV4SisyphusPrompt } from "./sisyphus/deepseek-v4";
 import { buildTaskManagementSection } from "./sisyphus/default";
 import { getGptApplyPatchPermission } from "./gpt-apply-patch-guard";
 import { getFrontierToolSchemaPermission } from "./frontier-tool-schema-guard";
@@ -573,6 +576,36 @@ export function createSisyphusAgent(
       } as AgentConfig["permission"],
       reasoningEffort: "medium",
     };
+  }
+
+  if (isDeepSeekV4Model(model)) {
+    const prompt = buildDeepSeekV4SisyphusPrompt(
+      model,
+      agents,
+      tools,
+      skills,
+      categories,
+      useTaskSystem,
+    );
+    const config: AgentConfig = {
+      description:
+        "Powerful AI orchestrator. Plans obsessively with todos, assesses search complexity before exploration, delegates strategically via category+skills combinations. Uses explore for internal code (parallel-friendly), librarian for external docs. (Sisyphus - OhMyOpenCode)",
+      mode: MODE,
+      model,
+      maxTokens: 64000,
+      prompt,
+      color: "#00CED1",
+      permission: {
+        question: "allow",
+        call_omo_agent: "deny",
+        ...getGptApplyPatchPermission(model),
+      } as AgentConfig["permission"],
+    };
+    // DeepSeek-V4 Pro has native thinking mode; Flash does not
+    if (isDeepSeekV4ProModel(model)) {
+      config.thinking = { type: "enabled", budgetTokens: 32000 };
+    }
+    return config;
   }
 
   if (isClaudeOpus47Model(model)) {
