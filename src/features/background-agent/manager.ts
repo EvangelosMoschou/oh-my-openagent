@@ -211,6 +211,12 @@ export interface SubagentSessionCreatedEvent {
 
 export type OnSubagentSessionCreated = (event: SubagentSessionCreatedEvent) => Promise<void>
 
+export interface SubagentSessionDeletedEvent {
+  sessionID: string
+}
+
+export type OnSubagentSessionDeleted = (event: SubagentSessionDeletedEvent) => Promise<void>
+
 const MAX_TASK_REMOVAL_RESCHEDULES = 6
 const MAX_COMPLETED_TASK_ARCHIVE_SIZE = 100
 const PARENT_WAKE_FAILURE_REQUEUE_WINDOW_MS = 5_000
@@ -220,6 +226,7 @@ export interface BackgroundManagerConfig {
   config?: BackgroundTaskConfig
   tmuxConfig?: TmuxConfig
   onSubagentSessionCreated?: OnSubagentSessionCreated
+  onSubagentSessionDeleted?: OnSubagentSessionDeleted
   onShutdown?: () => void | Promise<void>
   enableParentSessionNotifications?: boolean
   modelFallbackControllerAccessor?: ModelFallbackControllerAccessor
@@ -243,6 +250,7 @@ export class BackgroundManager {
   private config?: BackgroundTaskConfig
   private tmuxEnabled: boolean
   private onSubagentSessionCreated?: OnSubagentSessionCreated
+  private onSubagentSessionDeleted?: OnSubagentSessionDeleted
   private onShutdown?: () => void | Promise<void>
 
   private queuesByKey: Map<string, QueueItem[]> = new Map()
@@ -277,6 +285,7 @@ export class BackgroundManager {
     this.config = options.config
     this.tmuxEnabled = options?.tmuxConfig?.enabled ?? false
     this.onSubagentSessionCreated = options?.onSubagentSessionCreated
+    this.onSubagentSessionDeleted = options?.onSubagentSessionDeleted
     this.onShutdown = options?.onShutdown
     this.rootDescendantCounts = new Map()
     this.preStartDescendantReservations = new Set()
@@ -2345,6 +2354,13 @@ The task was re-queued on a fallback model after a retryable failure.
     if (task.sessionId) {
       // Awaited to prevent dangling promise during subagent teardown (Bun/WebKit SIGABRT)
       await this.abortSessionWithLogging(task.sessionId, `task completion (${source})`)
+
+      // @allow Notify tmux to close the pane immediately. client.session.abort() does not
+      // reliably emit session.deleted, so the polling fallback (60-min SESSION_TIMEOUT_MS)
+      // leaves panes orphaned for too long. See #4773.
+      await this.onSubagentSessionDeleted?.({ sessionID: task.sessionId }).catch((error) => {
+        log("[background-agent] onSubagentSessionDeleted callback failed:", { taskId: task.id, sessionID: task.sessionId, error: String(error) })
+      })
 
       clearDelegatedChildSessionBootstrap(task.sessionId)
       SessionCategoryRegistry.remove(task.sessionId)
