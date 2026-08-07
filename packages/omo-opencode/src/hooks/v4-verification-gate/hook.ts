@@ -12,24 +12,23 @@ function isV4Model(modelID: string): boolean {
 
 type SessionModelCache = Map<string, string>
 
+interface EventInput {
+  event: {
+    type: string
+    properties?: unknown
+  }
+}
+
 export function createV4VerificationGateHook() {
   const sessionModels: SessionModelCache = new Map()
 
   return {
-    event: (input: {
-      event: {
-        type: string
-        properties: {
-          info?: {
-            sessionID?: string
-            modelID?: string
-            role?: string
-          }
-        }
-      }
-    }): void => {
+    event: (input: EventInput): void => {
       if (input.event.type !== "message.updated") return
-      const info = input.event.properties?.info
+      const properties = input.event.properties as
+        | { info?: { sessionID?: string; modelID?: string; role?: string } }
+        | undefined
+      const info = properties?.info
       if (!info?.modelID || !info?.sessionID) return
       sessionModels.set(info.sessionID, info.modelID)
     },
