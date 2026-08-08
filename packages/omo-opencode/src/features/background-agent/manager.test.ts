@@ -2885,6 +2885,104 @@ describe("BackgroundManager.tryCompleteTask", () => {
     expect(promptBodies.length).toBe(1)
     expect(promptBodies.filter((body) => body.noReply === false)).toHaveLength(1)
   })
+
+  test("#given a terminal task is stuck in pendingByParent with no wake queued #when the parent session goes idle #then the lost notification is forced through the queue", async () => {
+    // given
+    type PromptAsyncBody = Record<string, unknown> & { noReply?: boolean }
+    const promptBodies: PromptAsyncBody[] = []
+    const client = {
+      session: {
+        prompt: async () => ({}),
+        promptAsync: async (body: PromptAsyncBody) => {
+          promptBodies.push(body)
+          return { data: {} }
+        },
+        abort: async () => ({}),
+        messages: async () => ({ data: [] }),
+        status: async () => ({ data: {} }),
+      },
+    }
+    manager.shutdown()
+    manager = new BackgroundManager({ pluginContext: createPluginInput(client) })
+
+    const parentSessionID = "parent-lost-wake"
+    const task = createMockTask({
+      id: "task-lost-wake",
+      parentSessionId: parentSessionID,
+      status: "completed",
+      completedAt: new Date(),
+    })
+    getTaskMap(manager).set(task.id, task)
+    getPendingByParent(manager).set(parentSessionID, new Set([task.id]))
+
+    // when — the parent goes idle while the completion notification is still owed
+    manager.handleEvent({ type: "session.idle", properties: { sessionID: parentSessionID } })
+    await waitForCoalescedFlush(manager, parentSessionID)
+
+    // then — the reconciliation sweep forces the notification instead of leaving the parent parked
+    expect(getPendingByParent(manager).get(parentSessionID)).toBeUndefined()
+    await waitUntil(() => getDispatchedParentWakes(manager).has(parentSessionID), 600)
+    expect(getDispatchedParentWakes(manager).has(parentSessionID)).toBe(true)
+    expect(promptBodies.some(body => body.body?.noReply === false)).toBe(true)
+  })
+
+  test("#given a sibling errors while another completes #when the error path runs #then pendingByParent is not emptied outside the serialized notification queue", async () => {
+    // given
+    let capturedOperation: (() => Promise<void>) | undefined
+    manager.shutdown()
+    manager = createBackgroundManager()
+    const enqueueSpy = spyOn(
+      cast<{
+        enqueueNotificationForParent: (
+          sessionID: string | undefined,
+          operation: () => Promise<void>,
+        ) => Promise<void>
+      }>(manager),
+      "enqueueNotificationForParent",
+    )
+    enqueueSpy.mockImplementation(async (_sessionID, operation) => {
+      capturedOperation = operation
+      return Promise.resolve()
+    })
+    const verifySpy = spyOn(
+      cast<{ verifySessionExists: (sessionID: string) => Promise<boolean> }>(manager),
+      "verifySessionExists",
+    )
+    verifySpy.mockImplementation(async () => false)
+
+    const parentSessionID = "parent-atomic-accounting"
+    const task = createMockTask({
+      id: "task-atomic-accounting",
+      sessionId: "session-atomic-accounting",
+      parentSessionId: parentSessionID,
+      status: "running",
+    })
+    getTaskMap(manager).set(task.id, task)
+    getPendingByParent(manager).set(parentSessionID, new Set([task.id]))
+
+    // when — a terminal session.error fires and the notification is queued but not yet run
+    manager.handleEvent({
+      type: "session.error",
+      properties: {
+        sessionID: task.sessionId,
+        error: { name: "UnknownError", data: { message: "Model not found: kimi-for-coding/k2p5." } },
+      },
+    })
+    await flushBackgroundNotifications()
+
+    // then — the decrement is deferred into the serialized queue, not done eagerly
+    expect(capturedOperation).toBeDefined()
+    expect(getPendingByParent(manager).get(parentSessionID)?.has(task.id)).toBe(true)
+
+    // when — the queued notification finally runs
+    await capturedOperation?.()
+
+    // then — the accounting settles atomically
+    expect(getPendingByParent(manager).get(parentSessionID)).toBeUndefined()
+
+    enqueueSpy.mockRestore()
+    verifySpy.mockRestore()
+  })
 })
 
 describe("BackgroundManager.trackTask", () => {
@@ -6140,7 +6238,15 @@ describe("BackgroundManager.handleEvent - session.error", () => {
       //#given
       const manager = createBackgroundManager()
       mockVerifySessionExists(manager, true)
-      const notifyParentSession = mock(async (_task: BackgroundTask) => {})
+      const notifyParentSession = mock(async (task: BackgroundTask) => {
+        const pending = getPendingByParent(manager).get(task.parentSessionId)
+        if (pending) {
+          pending.delete(task.id)
+          if (pending.size === 0) {
+            getPendingByParent(manager).delete(task.parentSessionId)
+          }
+        }
+      })
       ;(cast<{ notifyParentSession: (task: BackgroundTask) => Promise<void> }>(manager)).notifyParentSession = notifyParentSession
       const concurrencyManager = getConcurrencyManager(manager)
       const concurrencyKey = `terminal/${errorName}`

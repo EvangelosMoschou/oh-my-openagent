@@ -123,6 +123,32 @@ describe("BackgroundManager run continuation marker parent-wake races", () => {
     }
   })
 
+  test("#given a task is terminal but still tracked in pendingByParent #when refreshing the run marker #then the marker stays active", () => {
+    // given
+    const directory = createTestDirectory()
+    const parentSessionID = "parent-terminal-pending"
+    const manager = createManager(directory)
+    const internals = unsafeTestValue<BackgroundManagerMarkerInternals>(manager)
+    const task = createRunningTask({
+      id: "task-terminal-pending",
+      parentSessionId: parentSessionID,
+      status: "completed",
+    })
+    internals.tasks.set(task.id, task)
+    internals.pendingByParent.set(parentSessionID, new Set([task.id]))
+
+    try {
+      // when
+      internals.updateBackgroundTaskMarker(parentSessionID)
+
+      // then
+      const marker = readContinuationMarker(directory, parentSessionID)
+      expect(marker?.sources["background-task"]?.state).toBe("active")
+    } finally {
+      manager.shutdown()
+    }
+  })
+
   test("#given a completion parent wake is queued #when dispatch accepts it #then the marker returns idle", async () => {
     // given
     const directory = createTestDirectory()

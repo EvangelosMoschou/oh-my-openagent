@@ -1134,10 +1134,11 @@ The fallback retry session is now created and can be inspected directly.
   private updateBackgroundTaskMarker(parentSessionID: string): void {
     const tasks = this.getTasksByParentSession(parentSessionID)
     const activeTasks = tasks.filter(t => t.status === "running" || t.status === "pending")
+    const pendingByParentCount = this.pendingByParent.get(parentSessionID)?.size ?? 0
     writeBackgroundTaskMarker({
       directory: this.directory,
       parentSessionID,
-      activeTaskCount: activeTasks.length,
+      activeTaskCount: Math.max(activeTasks.length, pendingByParentCount),
       hasUndeliveredParentWake: this.hasUndeliveredParentWake(parentSessionID),
     })
   }
@@ -1802,6 +1803,7 @@ The fallback retry session is now created and can be inspected directly.
       if (!props || typeof props !== "object") return
       const sessionID = resolveSessionEventID(props)
       if (sessionID) {
+        this.reconcilePendingParentNotifications(sessionID)
         void this.enqueueNotificationForParent(sessionID, () => this.flushPendingParentWake(sessionID)).catch((error) => {
           log("[background-agent] Failed to flush pending parent wake:", { sessionID, error })
         })
@@ -2010,7 +2012,6 @@ The fallback retry session is now created and can be inspected directly.
       this.idleDeferralTimers.delete(task.id)
     }
 
-    this.cleanupPendingByParent(task)
     this.clearNotificationsForTask(task.id)
     removeTaskToastTracking(task.id)
     this.scheduleTaskRemoval(task.id)
@@ -2123,7 +2124,6 @@ The fallback retry session is now created and can be inspected directly.
       this.idleDeferralTimers.delete(task.id)
     }
 
-    this.cleanupPendingByParent(task)
     this.clearNotificationsForTask(task.id)
     const toastManager = getTaskToastManager()
     if (toastManager) {
@@ -2319,6 +2319,31 @@ The task was re-queued on a fallback model after a retryable failure.
       if (pending.size === 0) {
         this.pendingByParent.delete(task.parentSessionId)
       }
+    }
+  }
+
+  /**
+   * Backstop for #6546: a terminal task still tracked in pendingByParent means
+   * its completion notification never reached notifyParentSession (e.g. the
+   * parent-wake dispatch was dropped downstream). Force the notification
+   * through the serialized per-parent queue so the allComplete wake fires.
+   */
+  private reconcilePendingParentNotifications(parentSessionID: string): void {
+    const pending = this.pendingByParent.get(parentSessionID)
+    if (!pending || pending.size === 0) return
+    for (const taskId of [...pending]) {
+      const task = this.tasks.get(taskId)
+      if (!task || task.status === "running" || task.status === "pending") continue
+      if (this.notifications.get(parentSessionID)?.some(t => t.id === task.id)) continue
+      log("[background-agent] Reconciliation: notifying terminal task still tracked pending:", {
+        taskId,
+        parentSessionID,
+        status: task.status,
+      })
+      this.markForNotification(task)
+      this.enqueueNotificationForParent(parentSessionID, () => this.notifyParentSession(task)).catch(err => {
+        log("[background-agent] Error in reconciliation notification:", { taskId, error: err })
+      })
     }
   }
 
@@ -2917,7 +2942,6 @@ The task was re-queued on a fallback model after a retryable failure.
             }
           }
         }
-        this.cleanupPendingByParent(task)
         // Update continuation marker for CLI run mode
         if (task.parentSessionId) {
           this.updateBackgroundTaskMarker(task.parentSessionId)
@@ -2976,7 +3000,6 @@ The task was re-queued on a fallback model after a retryable failure.
       this.idleDeferralTimers.delete(task.id)
     }
 
-    this.cleanupPendingByParent(task)
     this.clearNotificationsForTask(task.id)
     removeTaskToastTracking(task.id)
     this.scheduleTaskRemoval(task.id)
