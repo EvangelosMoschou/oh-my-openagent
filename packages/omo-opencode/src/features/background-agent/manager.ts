@@ -744,7 +744,7 @@ export class BackgroundManager {
           // Update continuation marker for CLI run mode
           this.updateBackgroundTaskMarker(item.task.parentSessionId)
 
-          this.markForNotification(item.task)
+          this.markTerminalTaskForNotification(item.task)
           this.enqueueNotificationForParent(item.task.parentSessionId, () => this.notifyParentSession(item.task)).catch(err => {
             log("[background-agent] Failed to notify on startTask error:", err)
           })
@@ -1042,7 +1042,7 @@ The fallback retry session is now created and can be inspected directly.
         clearDelegatedChildSessionBootstrap(sessionID)
         await this.abortSessionWithLogging(sessionID, "launch error cleanup")
 
-        this.markForNotification(existingTask)
+        this.markTerminalTaskForNotification(existingTask)
         this.enqueueNotificationForParent(existingTask.parentSessionId, () => this.notifyParentSession(existingTask)).catch(err => {
           log("[background-agent] Failed to notify on error:", err)
         })
@@ -1495,7 +1495,7 @@ The fallback retry session is now created and can be inspected directly.
         await this.abortSessionWithLogging(existingTask.sessionId, "resume error cleanup")
       }
 
-      this.markForNotification(existingTask)
+      this.markTerminalTaskForNotification(existingTask)
       this.enqueueNotificationForParent(existingTask.parentSessionId, () => this.notifyParentSession(existingTask)).catch(err => {
         log("[background-agent] Failed to notify on resume error:", err)
       })
@@ -2023,7 +2023,7 @@ The fallback retry session is now created and can be inspected directly.
     }
 
     this.updateBackgroundTaskMarker(task.parentSessionId)
-    this.markForNotification(task)
+    this.markTerminalTaskForNotification(task)
     this.enqueueNotificationForParent(task.parentSessionId, () => this.notifyParentSession(task)).catch(err => {
       log("[background-agent] Failed to notify on async prompt failure:", { taskId: task.id, error: err })
     }).finally(releaseNotificationPreparation)
@@ -2140,7 +2140,7 @@ The fallback retry session is now created and can be inspected directly.
       this.updateBackgroundTaskMarker(task.parentSessionId)
     }
 
-    this.markForNotification(task)
+    this.markTerminalTaskForNotification(task)
     this.enqueueNotificationForParent(task.parentSessionId, () => this.notifyParentSession(task)).catch(err => {
       log("[background-agent] Error in notifyParentSession for errored task:", { taskId: task.id, error: err })
     })
@@ -2204,6 +2204,18 @@ The task was re-queued on a fallback model after a retryable failure.
     const queue = this.notifications.get(task.parentSessionId) ?? []
     queue.push(task)
     this.notifications.set(task.parentSessionId, queue)
+  }
+
+  /**
+   * Mark a terminal task for notification AND sweep the parent's pending set.
+   * Runs at every terminal-task transition so a lost sibling notification is
+   * forced even when the parent session never emits another event (#6546).
+   */
+  private markTerminalTaskForNotification(task: BackgroundTask): void {
+    this.markForNotification(task)
+    if (task.parentSessionId) {
+      this.reconcilePendingParentNotifications(task.parentSessionId)
+    }
   }
 
   getPendingNotifications(sessionID: string): BackgroundTask[] {
@@ -2483,7 +2495,7 @@ The task was re-queued on a fallback model after a retryable failure.
       return true
     }
 
-    this.markForNotification(task)
+    this.markTerminalTaskForNotification(task)
 
     try {
       await this.enqueueNotificationForParent(task.parentSessionId, () => this.notifyParentSession(task))
@@ -2592,7 +2604,7 @@ The task was re-queued on a fallback model after a retryable failure.
         task.concurrencyKey = undefined
       }
 
-      this.markForNotification(task)
+      this.markTerminalTaskForNotification(task)
 
       const idleTimer = this.idleDeferralTimers.get(task.id)
       if (idleTimer) {
@@ -2946,7 +2958,7 @@ The task was re-queued on a fallback model after a retryable failure.
         if (task.parentSessionId) {
           this.updateBackgroundTaskMarker(task.parentSessionId)
         }
-        this.markForNotification(task)
+        this.markTerminalTaskForNotification(task)
         this.enqueueNotificationForParent(task.parentSessionId, () => this.notifyParentSession(task)).catch(err => {
           log("[background-agent] Error in notifyParentSession for stale-pruned task:", { taskId: task.id, error: err })
         })
@@ -3013,7 +3025,7 @@ The task was re-queued on a fallback model after a retryable failure.
       this.updateBackgroundTaskMarker(task.parentSessionId)
     }
 
-    this.markForNotification(task)
+    this.markTerminalTaskForNotification(task)
     this.enqueueNotificationForParent(task.parentSessionId, () => this.notifyParentSession(task)).catch(err => {
       log("[background-agent] Error in notifyParentSession for crashed task:", { taskId: task.id, error: err })
     })

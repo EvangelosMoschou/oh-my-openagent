@@ -2926,6 +2926,53 @@ describe("BackgroundManager.tryCompleteTask", () => {
     expect(promptBodies.some(body => body.body?.noReply === false)).toBe(true)
   })
 
+  test("#given a terminal task is stuck in pendingByParent #when a sibling task transitions to terminal #then the lost notification is forced without any parent session event", async () => {
+    // given
+    type PromptAsyncBody = Record<string, unknown> & { noReply?: boolean }
+    const promptBodies: PromptAsyncBody[] = []
+    const client = {
+      session: {
+        prompt: async () => ({}),
+        promptAsync: async (body: PromptAsyncBody) => {
+          promptBodies.push(body)
+          return { data: {} }
+        },
+        abort: async () => ({}),
+        messages: async () => ({ data: [] }),
+        status: async () => ({ data: {} }),
+      },
+    }
+    manager.shutdown()
+    manager = new BackgroundManager({ pluginContext: createPluginInput(client) })
+
+    const parentSessionID = "parent-sibling-transition"
+    const stuckTask = createMockTask({
+      id: "task-stuck-terminal",
+      parentSessionId: parentSessionID,
+      status: "completed",
+      completedAt: new Date(),
+    })
+    const siblingTask = createMockTask({
+      id: "task-sibling",
+      sessionId: "session-sibling",
+      parentSessionId: parentSessionID,
+      status: "running",
+    })
+    getTaskMap(manager).set(stuckTask.id, stuckTask)
+    getTaskMap(manager).set(siblingTask.id, siblingTask)
+    getPendingByParent(manager).set(parentSessionID, new Set([stuckTask.id, siblingTask.id]))
+
+    // when — the sibling completes; NO parent session event is emitted
+    const completed = await tryCompleteTaskForTest(manager, siblingTask)
+
+    // then — the terminal transition sweeps the stuck task through the queue
+    expect(completed).toBe(true)
+    expect(getPendingByParent(manager).get(parentSessionID)).toBeUndefined()
+    await waitUntil(() => getDispatchedParentWakes(manager).has(parentSessionID), 600)
+    expect(getDispatchedParentWakes(manager).has(parentSessionID)).toBe(true)
+    expect(promptBodies.some(body => body.body?.noReply === false)).toBe(true)
+  })
+
   test("#given a sibling errors while another completes #when the error path runs #then pendingByParent is not emptied outside the serialized notification queue", async () => {
     // given
     let capturedOperation: (() => Promise<void>) | undefined
