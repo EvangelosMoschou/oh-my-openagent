@@ -88,10 +88,8 @@ export async function dispatchAfterSessionIdle<TInput>(args: {
       return { status: "active" }
     }
 
-    if (
-      checkToolState
-      && typeof client.session?.messages === "function"
-      && await sessionLatestAssistantBlocksInternalPrompt({
+    if (checkToolState && typeof client.session?.messages === "function") {
+      const inspection = await sessionLatestAssistantBlocksInternalPrompt({
         client,
         sessionID,
         input,
@@ -99,12 +97,20 @@ export async function dispatchAfterSessionIdle<TInput>(args: {
         source,
         timeoutMs: Math.min(dispatchTimeoutMs, getPromptGateMessagesFetchTimeoutMs()),
       })
-    ) {
-      log(`[prompt-async-gate] ${sessionName} skipped because latest assistant is still active`, {
-        sessionID,
-        source,
-      })
-      return { status: "active" }
+      if (inspection === "blocking") {
+        log(`[prompt-async-gate] ${sessionName} skipped because latest assistant is still active`, {
+          sessionID,
+          source,
+        })
+        return { status: "active" }
+      }
+      if (inspection === "unknown") {
+        log(`[prompt-async-gate] ${sessionName} inspection inconclusive; deferring`, {
+          sessionID,
+          source,
+        })
+        return { status: "inconclusive" }
+      }
     }
 
     log(`[prompt-async-gate] ${sessionName} dispatching`, { sessionID, source })

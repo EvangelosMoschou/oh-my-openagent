@@ -115,6 +115,8 @@ export function latestAssistantTurnBlocksInternalPrompt(messages: unknown[]): bo
   return false
 }
 
+export type AssistantTurnInspection = "blocking" | "clear" | "unknown"
+
 export async function sessionLatestAssistantBlocksInternalPrompt<TInput>(args: {
   readonly client: PromptDispatchClient
   readonly sessionID: string
@@ -122,10 +124,10 @@ export async function sessionLatestAssistantBlocksInternalPrompt<TInput>(args: {
   readonly sessionName: PromptSessionName
   readonly source: string
   readonly timeoutMs: number
-}): Promise<boolean> {
+}): Promise<AssistantTurnInspection> {
   const session = args.client.session
   if (typeof session?.messages !== "function") {
-    return false
+    return "clear"
   }
   const messages = session.messages.bind(session)
 
@@ -138,13 +140,17 @@ export async function sessionLatestAssistantBlocksInternalPrompt<TInput>(args: {
       args.timeoutMs,
       `[prompt-async-gate] ${args.sessionName} session.messages`,
     )
-    return latestAssistantTurnBlocksInternalPrompt(getMessagesData(response))
+    return latestAssistantTurnBlocksInternalPrompt(getMessagesData(response)) ? "blocking" : "clear"
   } catch (error) {
     log("[prompt-async-gate] latest assistant prompt-block check failed", {
       sessionID: args.sessionID,
       source: args.source,
       error: String(error),
     })
-    return !isPromptMessageInspectionAborted(error)
+    // A timed-out or failed inspection is NOT proof that the latest assistant
+    // turn blocks internal prompts (issue #6534): the read may have stalled
+    // under load while the session is genuinely idle. Report "unknown" so the
+    // caller can defer/retry instead of misclassifying the child as active.
+    return isPromptMessageInspectionAborted(error) ? "clear" : "unknown"
   }
 }

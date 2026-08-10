@@ -77,35 +77,58 @@ export async function promptWithModelSuggestionRetry(
   const timeoutMs = options.timeoutMs ?? PROMPT_TIMEOUT_MS
   const timeoutContext = createPromptTimeoutContext(args, timeoutMs)
 
+  // A gate inspection that times out is "inconclusive", not "active": the child
+  // session may be idle while the session.messages read stalls under load
+  // (issue #6534). Retry the dispatch with backoff instead of interrupting the
+  // launch; a verified active assistant turn still fails immediately.
+  const maxInconclusiveAttempts = 5
+  let inconclusiveAttempt = 0
+
   try {
-    const promptResult = await dispatchInternalPrompt({
-      mode: "async",
-      client,
-      sessionID: args.path.id,
-      input: {
-        ...args,
-        signal: timeoutContext.signal,
-      },
-      source: "model-suggestion-retry",
-      settleMs: 0,
-      ...(options.queueBehavior ? { queueBehavior: options.queueBehavior } : {}),
-      ...(options.checkStatus !== undefined ? { checkStatus: options.checkStatus } : {}),
-      ...(options.checkToolState !== undefined ? { checkToolState: options.checkToolState } : {}),
-    })
-    if (promptResult.status === "failed") {
+    for (;;) {
+      const promptResult = await dispatchInternalPrompt({
+        mode: "async",
+        client,
+        sessionID: args.path.id,
+        input: {
+          ...args,
+          signal: timeoutContext.signal,
+        },
+        source: "model-suggestion-retry",
+        settleMs: 0,
+        ...(options.queueBehavior ? { queueBehavior: options.queueBehavior } : {}),
+        ...(options.checkStatus !== undefined ? { checkStatus: options.checkStatus } : {}),
+        ...(options.checkToolState !== undefined ? { checkToolState: options.checkToolState } : {}),
+      })
+      if (promptResult.status === "failed") {
+        if (timeoutContext.wasTimedOut()) {
+          throw new Error(`promptAsync timed out after ${timeoutMs}ms`)
+        }
+        if (isAmbiguousPostDispatchPromptFailure(promptResult)) {
+          return
+        }
+        throw promptResult.error
+      }
+      if (promptResult.status === "inconclusive") {
+        inconclusiveAttempt += 1
+        releasePromptAsyncReservation(args.path.id, "model-suggestion-retry")
+        if (inconclusiveAttempt >= maxInconclusiveAttempts) {
+          throw new Error(`promptAsync skipped by gate: inconclusive after ${maxInconclusiveAttempts} inspection retries`)
+        }
+        log("[model-suggestion-retry] Gate inspection inconclusive; retrying dispatch", {
+          sessionID: args.path.id,
+          attempt: inconclusiveAttempt,
+        })
+        await new Promise((resolve) => setTimeout(resolve, Math.min(250 * 2 ** (inconclusiveAttempt - 1), 2_000)))
+        continue
+      }
+      if (!isInternalPromptDispatchAccepted(promptResult)) {
+        throw new Error(`promptAsync skipped by gate: ${promptResult.status}`)
+      }
       if (timeoutContext.wasTimedOut()) {
         throw new Error(`promptAsync timed out after ${timeoutMs}ms`)
       }
-      if (isAmbiguousPostDispatchPromptFailure(promptResult)) {
-        return
-      }
-      throw promptResult.error
-    }
-    if (!isInternalPromptDispatchAccepted(promptResult)) {
-      throw new Error(`promptAsync skipped by gate: ${promptResult.status}`)
-    }
-    if (timeoutContext.wasTimedOut()) {
-      throw new Error(`promptAsync timed out after ${timeoutMs}ms`)
+      return
     }
   } catch (error) {
     if (timeoutContext.wasTimedOut()) {
