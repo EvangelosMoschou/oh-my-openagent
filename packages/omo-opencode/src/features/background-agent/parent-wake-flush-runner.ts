@@ -81,6 +81,22 @@ export class ParentWakeFlushRunner {
       if (this.deferReplyWakeWhileUnsafe(sessionID, latestWake)) {
         return
       }
+      // The tool-wait deferral path has no independent ceiling: a reply-required
+      // wake can be re-admitted as noReply forever while the parent history keeps
+      // reporting a stale tool call (issue #6546 D1). Apply the same age ceiling
+      // as the active-session path so the reply is eventually force-dispatched.
+      if (this.shouldForceDispatchAfterActiveDefer(latestWake)) {
+        await this.sendParentWakePrompt(sessionID, latestWake, {
+          emptyAssistantTurnRetry,
+          toolWaitDecision: { ...toolWaitDecision, skipPromptGateToolStateCheck: true },
+          skipPromptGateStatusCheck: true,
+        })
+        log("[background-agent] Sent parent wake after tool-wait defer ceiling:", {
+          sessionID,
+          queuedAgeMs: this.getQueuedAgeMs(latestWake),
+        })
+        return
+      }
       await this.sendParentWakePrompt(sessionID, latestWake, {
         emptyAssistantTurnRetry,
         toolWaitDecision: { ...toolWaitDecision, skipPromptGateToolStateCheck: true },
@@ -185,12 +201,17 @@ export class ParentWakeFlushRunner {
     this.deps.pendingQueue.clearTimer(sessionID)
   }
 
-  // A retained reply-required wake is only liveness insurance for a deposit the
-  // parent never saw. Assistant output created after the noReply admission means
-  // the live turn consumed the deposit — re-dispatching it would inject a
-  // duplicate notification and fork a concurrent assistant chain.
+  // A retained reply-required wake is liveness insurance for a deposit the
+  // parent never saw. Assistant output created after the noReply admission can
+  // be unrelated parent activity (timeout recovery, another task's output), so
+  // a reply-required wake must never be dropped here: the reply is still owed.
+  // Only non-reply wakes (noReplyAdmittedAt set, shouldReply false) can be
+  // consumed by later parent output.
   private async dropAdmittedWakeConsumedByParent(sessionID: string, latestWake: PendingParentWake): Promise<boolean> {
     if (latestWake.noReplyAdmittedAt === undefined) {
+      return false
+    }
+    if (latestWake.shouldReply) {
       return false
     }
     if (!(await this.deps.sessionInspector.hasAssistantOutputAfterAdmittedWake(sessionID, latestWake))) {
