@@ -247,7 +247,7 @@ describe("parent wake active defer ceiling", () => {
     }
   })
 
-  test("#given blocked tool history and aged wake while parent is busy #then it admits noReply", async () => {
+  test("#given blocked tool history and aged wake while parent is busy #then it force-dispatches the reply past the tool-wait ceiling", async () => {
     // given
     const { notifier, promptAsyncCalls } = createNotifier({
       sessionStatuses: { "parent-1": { type: "busy" } },
@@ -259,11 +259,11 @@ describe("parent wake active defer ceiling", () => {
       // when
       await notifier.flushPendingParentWake("parent-1")
 
-      // then
+      // then — the aged reply-required wake is force-dispatched instead of
+      // being admitted as noReply forever (issue #6546 D1)
       expect(promptAsyncCalls).toHaveLength(1)
-      expect(promptAsyncCalls[0]?.body.noReply).toBe(true)
-      expect(notifier.getPendingParentWakes().get("parent-1")?.shouldReply).toBe(true)
-      expect(notifier.getPendingParentWakeTimers().has("parent-1")).toBe(true)
+      expect(promptAsyncCalls[0]?.body.noReply).not.toBe(true)
+      expect(notifier.getPendingParentWakes().has("parent-1")).toBe(false)
     } finally {
       notifier.shutdown()
     }

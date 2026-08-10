@@ -366,11 +366,11 @@ describe("parent wake admitted-consumption drop (duplicate ALL-COMPLETE regressi
       notifier.clearPendingParentWakeTimer("parent-1")
       await notifier.flushPendingParentWake("parent-1")
 
-      // then: the retained wake is dropped instead of re-dispatched as a
-      // reply prompt (which forked a concurrent assistant chain in production)
+      // then: no duplicate reply prompt is forked (the admitted wake was
+      // consumed by the live turn), and the reply-required wake is retained
+      // rather than destroyed (issue #6546 D2)
       expect(promptAsyncCalls).toHaveLength(1)
-      expect(notifier.getPendingParentWakes().has("parent-1")).toBe(false)
-      expect(notifier.getDispatchedParentWakes().has("parent-1")).toBe(false)
+      expect(notifier.getPendingParentWakes().get("parent-1")?.shouldReply).toBe(true)
     } finally {
       Date.now = originalDateNow
       notifier.shutdown()
