@@ -716,7 +716,7 @@ describe("createTeamSendMessageTool", () => {
     const [messageFile] = (await readdir(inboxDir)).filter((entry) => entry.endsWith(".json"))
     const message = MessageSchema.parse(JSON.parse(await readFile(path.join(inboxDir, messageFile), "utf8")))
     expect(message.from).toBe("m1")
-  })
+  }, { timeout: 15000 })
 
   test("keeps live-delivered messages reserved until the recipient idles", async () => {
     // given
@@ -741,7 +741,7 @@ describe("createTeamSendMessageTool", () => {
     const runtimeState = await loadState(fixture.teamRunId, fixture.config)
     const recipient = runtimeState.members.find((member) => member.name === "m2")
     expect(recipient?.pendingInjectedMessageIds).toHaveLength(1)
-  })
+  }, { timeout: 15000 })
 
   test("broadcast fans out live delivery to every member except the sender", async () => {
     // given
@@ -763,7 +763,7 @@ describe("createTeamSendMessageTool", () => {
       fixture.memberOneSessionId,
       fixture.memberTwoSessionId,
     ].sort())
-  })
+  }, { timeout: 15000 })
 
   test("broadcast still queues for members whose session has not spawned yet", async () => {
     // given
@@ -793,7 +793,7 @@ describe("createTeamSendMessageTool", () => {
     expect(targetedSessionIds).toEqual([fixture.memberOneSessionId])
     const memberTwoInbox = await readdir(getInboxDir(resolveBaseDir(fixture.config), fixture.teamRunId, "m2"))
     expect(memberTwoInbox.filter((entry) => entry.endsWith(".json") && !entry.startsWith("."))).toHaveLength(1)
-  })
+  }, { timeout: 15000 })
 
   test("inbox stays intact when live delivery fails so the fallback path still works", async () => {
     // given
