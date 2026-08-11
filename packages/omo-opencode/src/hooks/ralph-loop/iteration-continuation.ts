@@ -18,7 +18,7 @@ type ContinuationOptions = {
 
 export type ContinuationResult =
   | { status: "dispatched"; sessionID: string }
-  | { status: "dispatch_deferred"; reason: "active" | "reserved" }
+  | { status: "dispatch_deferred"; reason: "active" | "reserved" | "inconclusive" }
   | { status: "session_creation_rejected" }
   | { status: "dispatch_rejected"; error: unknown }
 

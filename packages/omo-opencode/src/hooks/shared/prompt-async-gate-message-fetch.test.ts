@@ -40,8 +40,9 @@ describe("dispatchInternalPrompt message fetch safety", () => {
       dispatchTimeoutMs: 50,
     })
 
-    // then
-    expect(result.status).toBe("queued")
+    // then — the stalled inspection is reported as inconclusive, never
+    // dispatched as a prompt (issue #6534)
+    expect(result.status).toBe("inconclusive")
     expect(promptCalls).toBe(0)
   })
 
@@ -72,8 +73,9 @@ describe("dispatchInternalPrompt message fetch safety", () => {
       dispatchTimeoutMs: 50,
     })
 
-    // then
-    expect(result.status).toBe("queued")
+    // then — the failed inspection is reported as inconclusive, never
+    // dispatched as a prompt (issue #6534)
+    expect(result.status).toBe("inconclusive")
     expect(promptCalls).toBe(0)
   })
 })

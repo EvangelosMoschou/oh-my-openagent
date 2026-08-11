@@ -23,9 +23,9 @@ type MessageInfo = {
 }
 
 export type ContinuationPromptResult =
-	| { status: "dispatched" }
-	| { status: "deferred"; reason: "active" | "reserved" }
-	| { status: "rejected"; error: Error }
+  | { status: "dispatched" }
+  | { status: "deferred"; reason: "active" | "reserved" | "inconclusive" }
+  | { status: "rejected"; error: Error }
 
 function extractPromptAsyncError(response: unknown): unknown | undefined {
 	if (!isRecord(response) || !Object.hasOwn(response, "error")) {
@@ -167,6 +167,9 @@ export async function injectContinuationPrompt(
 		}
 		if (promptResult.status === "active" || promptResult.status === "reserved") {
 			return { status: "deferred", reason: promptResult.status }
+		}
+		if (promptResult.status === "inconclusive") {
+			return { status: "deferred", reason: "inconclusive" }
 		}
 		if (promptResult.status !== "dispatched") {
 			return {

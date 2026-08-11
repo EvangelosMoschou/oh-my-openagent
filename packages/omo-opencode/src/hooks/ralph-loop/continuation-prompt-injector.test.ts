@@ -144,8 +144,9 @@ describe("ralph-loop continuation prompt injector", () => {
       apiTimeoutMs: 50,
     })
 
-    // then
-    expect(result).toEqual({ status: "deferred", reason: "active" })
+    // then — a failed inspection is inconclusive, not active (issue #6534);
+    // the continuation is deferred so it can be retried, not rejected
+    expect(result).toEqual({ status: "deferred", reason: "inconclusive" })
     expect(promptCalls).toBe(0)
   })
 
