@@ -18,7 +18,7 @@ import {
   maskProviderAndModel,
 } from "./product-identity"
 import { BUILTIN_CATEGORY_DEFAULTS, CURATED_READONLY_AGENT_NAMES } from "@oh-my-opencode/senpi-task"
-import { getTelemetryApiKey } from "@oh-my-opencode/telemetry-core"
+import { UNCONFIGURED_POSTHOG_API_KEY, getTelemetryApiKey, isConfiguredTelemetryApiKey } from "@oh-my-opencode/telemetry-core"
 
 const originalAgentDir = process.env.SENPI_CODING_AGENT_DIR
 const temporaryRoots: string[] = []
@@ -37,15 +37,16 @@ function useTemporaryAgentDir(): string {
 }
 
 describe("OmO Native product identity", () => {
-  test("#given the native product #when config is created #then identity derivation and geoip settings are fixed", () => {
+  test("#given the native product #when config is created #then identity derivation and effective geoip settings are fixed", () => {
     const config = createOmoNativeProductConfig()
 
-    expect(OMO_NATIVE_POSTHOG_API_KEY).toBe("phc_REPLACE_ME_OMO_NATIVE")
+    expect(OMO_NATIVE_POSTHOG_API_KEY).not.toBe(UNCONFIGURED_POSTHOG_API_KEY)
+    expect(isConfiguredTelemetryApiKey(OMO_NATIVE_POSTHOG_API_KEY)).toBe(true)
     expect(config.platform).toBe("omo-senpi")
     expect(config.machineIdPrefix).toBe("omo-senpi:")
     expect(config.packageVersion).toBe("5.0.0-beta.5")
     expect(config.productEnvPrefix).toBe("OMO_SENPI")
-    expect(config.disableGeoip).toBe(true)
+    expect(config.disableGeoip ?? false).toBe(false)
     expect(getTelemetryApiKey({ POSTHOG_API_KEY: "env-project-key" }, config.defaultApiKey)).toBe("env-project-key")
   })
 
