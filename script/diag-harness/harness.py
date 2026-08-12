@@ -6,8 +6,11 @@ per seed to produce a fresh randomized project (tests + check.sh carry expected
 values computed by the generator). Scenarios without gen.py reset a pristine
 snapshot between runs.
 
-Search: epsilon-greedy bandit over config combos (variant x temperature x top_p)
-with pass-rate memory; untried combos get exploration priority. Learning:
+Search: UCB1 bandit over config combos (variant x temperature x top_p): every
+combo must be sampled at least MIN_SAMPLES times before exploitation, then
+selection maximizes the UCB1 index (mean + sqrt(2 ln N / n)); the bandit RNG is
+seeded (--seed) for reproducible searches, and the report includes a Fisher
+exact significance test between the top two combos. Learning:
 failure signals map to guardrail lines appended to guardrails.md, rendered into
 `.omo/rules/diag-guardrail-*.md` rule files (alwaysApply) consumed by the native
 rules-injector hook, capped at 12 lines.
@@ -16,6 +19,7 @@ Usage: harness.py <scenarios-dir> <evidence-dir> [--seeds N] [--max-iter N]
 """
 import argparse
 import json
+import math
 import os
 import random
 import re
@@ -55,18 +59,38 @@ GUARDRAIL_RULES = [
 
 COMBO_STATS = {}
 
+MIN_SAMPLES = 4
+
 
 def combo_key(mut_cfg):
     return json.dumps(mut_cfg, sort_keys=True)
 
 
 def pick_combo():
-    untried = [m for m in MUTATIONS if combo_key(m[1]) not in COMBO_STATS]
-    if untried and (random.random() < 0.5 or not COMBO_STATS):
-        return random.choice(untried)
-    best = max(COMBO_STATS.items(), key=lambda kv: (kv[1][0] / kv[1][1], kv[1][1]))
+    """UCB1 selection with a minimum-sample floor.
+
+    Every combo must be observed at least MIN_SAMPLES times before it becomes
+    eligible for exploitation; until then, untried / under-sampled combos are
+    picked uniformly. Once the floor is met, selection maximizes the UCB1 index
+    mean + sqrt(2 ln N / n), which balances exploitation (high mean) against
+    exploration (low n / high variance).
+    """
+    under_sampled = [
+        m for m in MUTATIONS
+        if combo_key(m[1]) not in COMBO_STATS or COMBO_STATS[combo_key(m[1])][1] < MIN_SAMPLES
+    ]
+    if under_sampled:
+        return random.choice(under_sampled)
+    total_runs = sum(n for _, n in COMBO_STATS.values())
+
+    def ucb1_index(key):
+        wins, n = COMBO_STATS[key]
+        mean = wins / n
+        return mean + math.sqrt(2 * math.log(total_runs) / n)
+
+    best_key = max(COMBO_STATS, key=ucb1_index)
     for mut in MUTATIONS:
-        if combo_key(mut[1]) == best[0]:
+        if combo_key(mut[1]) == best_key:
             return mut
     return MUTATIONS[0]
 
@@ -75,6 +99,55 @@ def record_combo(mut_cfg, passed):
     key = combo_key(mut_cfg)
     wins, n = COMBO_STATS.get(key, (0, 0))
     COMBO_STATS[key] = (wins + (1 if passed else 0), n + 1)
+
+
+def fisher_exact_p(a, b, c, d):
+    """Two-sided Fisher exact test p-value for [[a, b], [c, d]].
+
+    a/c are pass counts, b/d fail counts for two combos. Sums the
+    hypergeometric probabilities of all tables as extreme or more extreme
+    than the observed one.
+    """
+    row1 = a + b
+    row2 = c + d
+    col1 = a + c
+    n = row1 + row2
+
+    def hypergeom(a_cell):
+        return (math.comb(row1, a_cell) * math.comb(row2, col1 - a_cell)) / math.comb(n, col1)
+
+    p_observed = hypergeom(a)
+    total = 0.0
+    lo = max(0, col1 - row2)
+    hi = min(row1, col1)
+    for a_cell in range(lo, hi + 1):
+        if hypergeom(a_cell) <= p_observed + 1e-15:
+            total += hypergeom(a_cell)
+    return total
+
+
+def top_combos_significance():
+    """Fisher exact test between the two best-sampled combos.
+
+    Returns None when fewer than two combos have reached MIN_SAMPLES; the
+    comparison is only meaningful once the floor is met.
+    """
+    sampled = [(k, v) for k, v in COMBO_STATS.items() if v[1] >= MIN_SAMPLES]
+    if len(sampled) < 2:
+        return None
+    ranked = sorted(sampled, key=lambda kv: kv[1][0] / kv[1][1], reverse=True)
+    (k1, (w1, n1)), (k2, (w2, n2)) = ranked[0], ranked[1]
+    p_value = fisher_exact_p(w1, n1 - w1, w2, n2 - w2)
+    return {
+        "best": k1,
+        "best_pass": round(w1 / n1, 3),
+        "best_runs": n1,
+        "runner_up": k2,
+        "runner_up_pass": round(w2 / n2, 3),
+        "runner_up_runs": n2,
+        "p_value": round(p_value, 4),
+        "significant": p_value < 0.05,
+    }
 
 
 def load_config(mutation_name, mut_cfg):
@@ -236,7 +309,9 @@ def main():
     ap.add_argument("evidence_dir")
     ap.add_argument("--seeds", type=int, default=1)
     ap.add_argument("--max-iter", type=int, default=2)
+    ap.add_argument("--seed", type=int, default=0, help="RNG seed for the UCB1 bandit (reproducible searches)")
     args = ap.parse_args()
+    random.seed(args.seed)
 
     scenarios = sorted(
         d for d in os.listdir(args.scenarios_dir)
@@ -292,6 +367,12 @@ def main():
     report = {
         "runs": results,
         "combo_stats": {k: {"pass": v[0], "runs": v[1]} for k, v in COMBO_STATS.items()},
+        "bandit": {
+            "algorithm": "UCB1",
+            "min_samples": MIN_SAMPLES,
+            "seed": args.seed,
+            "significance": top_combos_significance(),
+        },
         "learned_guardrails": [l for l in open(GUARDRAILS).read().splitlines() if l.strip()],
         "per_scenario_pass_rate": {
             s: round(sum(1 for r in results if r["scenario"] == s and r["passed"]) / max(1, sum(1 for r in results if r["scenario"] == s)), 2)
@@ -303,6 +384,7 @@ def main():
     print("\n===== HARNESS REPORT =====")
     print(json.dumps(report["per_scenario_pass_rate"], indent=2))
     print("combo stats:", json.dumps(report["combo_stats"], indent=2))
+    print("bandit:", json.dumps(report["bandit"], indent=2))
     print("learned guardrails:", report["learned_guardrails"] or "(none)")
 
 

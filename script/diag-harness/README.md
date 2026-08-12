@@ -15,8 +15,11 @@ reproducible delegation-trap failure that the harness learns to recover from.
   markers, CJK bleed, fabricated IDs, delegation/todo tool usage.
 - Verifies the model's work independently (`bun test` + `check.sh`) — never trusts the model's
   own claims.
-- Searches the omo config space (variant / temperature / top_p) with an epsilon-greedy bandit
-  that explores untried combos and exploits the best pass-rate combo.
+- Searches the omo config space (variant / temperature / top_p) with a UCB1 bandit:
+  every combo is sampled at least `MIN_SAMPLES` (4) times before exploitation, then
+  selection maximizes the UCB1 index (mean + sqrt(2 ln N / n)). The search RNG is
+  seeded (`--seed`) for reproducible runs, and the report includes a Fisher exact
+  significance test between the top two combos.
 - Learns guardrails from failure signals (drift / CJK / hallucination / fabricated-ID /
   unavailable-tool / API failure / lost-constraint): appends one instruction per signal to
   `guardrails.md`, renders them into `.omo/rules/diag-guardrail-*.md` rule files
