@@ -8,9 +8,9 @@ snapshot between runs.
 
 Search: epsilon-greedy bandit over config combos (variant x temperature x top_p)
 with pass-rate memory; untried combos get exploration priority. Learning:
-failure signals map to guardrail lines appended to guardrails.md, injected into
-subsequent runs via prompt_append (key `sisyphus`, file:// inside the project
-root), capped at 12 lines.
+failure signals map to guardrail lines appended to guardrails.md, rendered into
+`.omo/rules/diag-guardrail-*.md` rule files (alwaysApply) consumed by the native
+rules-injector hook, capped at 12 lines.
 
 Usage: harness.py <scenarios-dir> <evidence-dir> [--seeds N] [--max-iter N]
 """
@@ -77,7 +77,7 @@ def record_combo(mut_cfg, passed):
     COMBO_STATS[key] = (wins + (1 if passed else 0), n + 1)
 
 
-def load_config(mutation_name, mut_cfg, guardrails_path):
+def load_config(mutation_name, mut_cfg):
     with open(BASE_CONFIG) as f:
         cfg = f.read()
     cfg = cfg.replace('"variant": "max"', f'"variant": "{mut_cfg.get("variant", "max")}"')
@@ -86,9 +86,6 @@ def load_config(mutation_name, mut_cfg, guardrails_path):
         cfg = cfg.replace(junior, f'"sisyphus-junior": {{ "temperature": {mut_cfg["temperature"]},')
     if mut_cfg.get("top_p") is not None:
         cfg = cfg.replace(junior, f'"sisyphus-junior": {{ "top_p": {mut_cfg["top_p"]},')
-    if guardrails_path and os.path.exists(guardrails_path) and os.path.getsize(guardrails_path) > 0:
-        append = f'"prompt_append": "file://{os.path.abspath(guardrails_path)}"'
-        cfg = cfg.replace(junior, f'"sisyphus": {{ {append} }},\n  {junior}')
     out = os.path.join(tempfile.gettempdir(), f"diag-harness-config-{mutation_name}.jsonc")
     with open(out, "w") as f:
         f.write(cfg)
@@ -149,6 +146,30 @@ def cap_guardrails():
     if len(lines) > 12:
         with open(GUARDRAILS, "w") as f:
             f.write("\n".join(lines[:12]) + "\n")
+
+
+def emit_rule_files(rules_dir):
+    """Render learned guardrails as .omo/rules/*.md for the native rules-injector.
+
+    The rules-injector hook scans `.omo/rules` in the project root and injects
+    matched rule files into tool output. Each learned guardrail becomes its own
+    rule file with `alwaysApply: true`, so a signal that fired in a previous
+    iteration is injected into subsequent runs without any custom prompt_append.
+    """
+    os.makedirs(rules_dir, exist_ok=True)
+    if not os.path.exists(GUARDRAILS):
+        return
+    lines = [l for l in open(GUARDRAILS).read().splitlines() if l.strip()]
+    for index, rule in enumerate(lines):
+        rule_path = os.path.join(rules_dir, f"diag-guardrail-{index + 1}.md")
+        with open(rule_path, "w") as f:
+            f.write(
+                "---\n"
+                "description: Learned guardrail from diag-harness failure signal\n"
+                "alwaysApply: true\n"
+                "---\n"
+                f"{rule}\n"
+            )
 
 
 def detect_signals(score, bun_ok, check_ok, check_tail, jsonl_path):
@@ -231,13 +252,13 @@ def main():
         print(f"\n===== SCENARIO {sc} =====")
         for seed in range(1, args.seeds + 1):
             gen_project(sc_dir, seed)
-            sc_guardrails = os.path.join(sc_dir, "project", ".omo", "guardrails.md")
-            os.makedirs(os.path.dirname(sc_guardrails), exist_ok=True)
+            sc_rules_dir = os.path.join(sc_dir, "project", ".omo", "rules")
+            os.makedirs(sc_rules_dir, exist_ok=True)
             for iteration in range(args.max_iter):
                 mut_name, mut_cfg = pick_combo()
-                shutil.copyfile(GUARDRAILS, sc_guardrails)
+                emit_rule_files(sc_rules_dir)
                 label = f"{sc}-s{seed}-i{iteration}-{mut_name}"
-                config_path = load_config(mut_name, mut_cfg, sc_guardrails)
+                config_path = load_config(mut_name, mut_cfg)
                 print(f"[harness] {label}: {combo_key(mut_cfg)} guardrails={'yes' if guardrail_evidence else 'no'}")
                 t0 = time.time()
                 score, bun_ok, bun_passes, check_ok, check_tail, jsonl = run_one(sc_dir, label, config_path, args.evidence_dir)

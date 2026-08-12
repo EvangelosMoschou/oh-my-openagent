@@ -19,8 +19,10 @@ reproducible delegation-trap failure that the harness learns to recover from.
   that explores untried combos and exploits the best pass-rate combo.
 - Learns guardrails from failure signals (drift / CJK / hallucination / fabricated-ID /
   unavailable-tool / API failure / lost-constraint): appends one instruction per signal to
-  `guardrails.md`, injects them into later runs via the omo `prompt_append` config (key
-  `sisyphus`, file:// inside the project root), dedupes per signal, and caps at 12 lines.
+  `guardrails.md`, renders them into `.omo/rules/diag-guardrail-*.md` rule files
+  (`alwaysApply: true`) inside each scenario project, dedupes per signal, and caps at 12
+  lines. The omo `rules-injector` hook picks these up natively on every tool execution —
+  no custom `prompt_append` config injection needed.
 - Resets each scenario's project to a pristine snapshot per iteration, and isolates every run
   in its own `mktemp` sandbox (real DB untouched).
 
