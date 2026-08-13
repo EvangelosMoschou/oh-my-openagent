@@ -160,7 +160,12 @@ export function createToolGuardHooks(args: {
     : null
 
   const v4VerificationGate = isHookEnabled("v4-verification-gate")
-    ? safeHook("v4-verification-gate", () => createV4VerificationGateHook())
+    ? safeHook("v4-verification-gate", () =>
+        createV4VerificationGateHook({
+          ctx,
+          config: pluginConfig.pro_flash_loop ?? { enabled: false, max_iterations: 3, evidence_max_chars: 1500 },
+        }),
+      )
     : null
 
   return {
