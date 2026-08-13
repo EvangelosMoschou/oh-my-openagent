@@ -7,10 +7,11 @@ import {
   type TelemetryEnv,
   type TelemetryProductConfig,
 } from "@oh-my-opencode/telemetry-core"
-import { BUILTIN_CATEGORY_DEFAULTS, CURATED_READONLY_AGENT_NAMES } from "@oh-my-opencode/senpi-task"
+import { CURATED_READONLY_AGENT_NAMES } from "@oh-my-opencode/senpi-task/agents-builtin"
+import { BUILTIN_CATEGORY_DEFAULTS } from "@oh-my-opencode/senpi-task/category-builtins"
 import { resolveAgentHome } from "../agent-home/resolve-agent-home"
 
-export const OMO_NATIVE_POSTHOG_API_KEY = "phc_REPLACE_ME_OMO_NATIVE"
+export const OMO_NATIVE_POSTHOG_API_KEY = "phc_r6UYQzNZcGYSzKw4PxCiVrZepGqV3dw9qcvcKtRNUWAn"
 
 export type OmoNativePropertyType = "boolean" | "number" | "string"
 
@@ -59,7 +60,7 @@ export const CURATED_AGENTS = Object.freeze([...CURATED_READONLY_AGENT_NAMES])
 export const BUILTIN_CATEGORY_NAMES = Object.freeze(BUILTIN_CATEGORY_DEFAULTS.map(({ name }) => name))
 export const BUILTIN_SKILL_NAMES = Object.freeze([
   "ast-grep", "coding-agent-sessions", "data-scientist", "debugging", "frontend", "git-master",
-  "give-me-tips", "hyperplan", "init-deep", "lsp-setup", "programming", "refactor", "remove-ai-slops",
+  "give-me-tips", "hyperplan", "init-deep", "lsp-setup", "onboarding", "programming", "refactor", "remove-ai-slops",
   "review-work", "start-work", "ultimate-browsing", "ultrawork", "ulw-loop", "ulw-plan", "ulw-research",
   "visual-qa",
 ] as const)
@@ -151,12 +152,11 @@ const SALT_FILE_NAME = "session-id-salt"
 const SALT_LENGTH = 32
 const fallbackSalts = new Map<string, Buffer>()
 
-export function createOmoNativeProductConfig(): TelemetryProductConfig & { readonly disableGeoip: true } {
+export function createOmoNativeProductConfig(): TelemetryProductConfig {
   return {
     cacheDirName: "omo-native",
     defaultApiKey: OMO_NATIVE_POSTHOG_API_KEY,
     defaultHost: DEFAULT_POSTHOG_HOST,
-    disableGeoip: true,
     eventName: "daily_active",
     machineIdPrefix: "omo-senpi:",
     packageName: "@oh-my-opencode/omo-senpi",
