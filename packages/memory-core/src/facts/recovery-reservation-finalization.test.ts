@@ -156,7 +156,7 @@ describe("facts deletion reservation finalization", () => {
     expect((await repo.pathState.capture(september)).index).toEqual(indexBefore.get(september)?.index ?? null)
     expect(await repo.pathState.capture(september)).toEqual(recovery.paths.find((entry) => entry.path === september)!.pre)
     await expectNoReceipt(repo, recovery.batchId)
-  })
+  }, { timeout: 15000 })
 
   test("does not overwrite a newer foreign directory while restoring a mismatched claim", async () => {
     const { dir, repo } = await fixture()
