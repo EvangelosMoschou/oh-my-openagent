@@ -7,7 +7,7 @@ import type { ProFlashLoopConfig } from "../../config/schema/pro-flash-loop"
 const V4_VERIFICATION_REMINDER =
   "\n\n--- V4 VERIFICATION REQUIRED ---\nDeepSeek V4 has a 94% hallucination rate. Inspect touched files and rerun checks before accepting these results."
 
-const DELEGATION_TOOLS = new Set(["task", "call_omo_agent"])
+const DELEGATION_TOOLS = new Set(["task", "call_omo_agent", "call_dsh_agent"])
 
 const FAILURE_SIGNALS = [
   /(^|\s)(fail(ed|ure)?|error|exception|reject(ed)?)(\s|$|:)/i,
@@ -28,6 +28,18 @@ function hasFailureSignal(output: string): boolean {
   if (!output) return false
   const sample = output.slice(0, 20000)
   return FAILURE_SIGNALS.some((pattern) => pattern.test(sample))
+}
+
+function hasFailureMetadata(metadata: unknown): boolean {
+  if (!metadata || typeof metadata !== "object") return false
+  const record = metadata as { stopReason?: unknown; exitCode?: unknown }
+  if (record.stopReason === "error" || record.stopReason === "refusal" || record.stopReason === "cancelled") {
+    return true
+  }
+  if (typeof record.exitCode === "number" && record.exitCode !== 0) {
+    return true
+  }
+  return false
 }
 
 function buildReplanPrompt(tool: string, evidence: string): string {
@@ -109,7 +121,7 @@ export function createV4VerificationGateHook(deps: V4VerificationGateDeps) {
 
       if (!loopEnabled) return
       const evidence = output.output ?? ""
-      if (!hasFailureSignal(evidence)) return
+      if (!hasFailureSignal(evidence) && !hasFailureMetadata(output.metadata)) return
 
       const iterations = sessionIterations.get(input.sessionID) ?? 0
       if (iterations >= maxIterations) {

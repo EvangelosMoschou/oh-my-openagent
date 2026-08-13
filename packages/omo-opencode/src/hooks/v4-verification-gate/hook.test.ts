@@ -201,4 +201,71 @@ describe("v4-verification-gate", () => {
     // then — exactly 2 dispatches, the 3rd escalates
     expect(dispatchMock).toHaveBeenCalledTimes(2)
   })
+
+  test("#given a dsh agent completion #when tool.execute.after runs #then reminder appended and the tool is treated as delegated", () => {
+    // given
+    dispatchMock.mockClear()
+    const hook = hookWith(makeConfig({ enabled: true }))
+    const sessionID = "ses_dsh"
+
+    registerV4Session(hook, sessionID)
+
+    // when
+    const output = { title: "dsh agent", output: "Agent result.", metadata: { stopReason: "end_turn" } }
+    hook["tool.execute.after"]({ tool: "call_dsh_agent", sessionID, callID: "call_dsh_1" }, output)
+
+    // then
+    expect(output.output).toContain("V4 VERIFICATION REQUIRED")
+    expect(dispatchMock).not.toHaveBeenCalled()
+  })
+
+  test("#given a dsh agent completion with a failure stop reason #when tool.execute.after runs #then dispatches a re-plan prompt", () => {
+    // given
+    dispatchMock.mockClear()
+    const hook = hookWith(makeConfig({ enabled: true }))
+    const sessionID = "ses_dsh_fail"
+
+    registerV4Session(hook, sessionID)
+
+    // when — clean text but failing metadata
+    const output = { title: "dsh agent", output: "Done.", metadata: { stopReason: "error" } }
+    hook["tool.execute.after"]({ tool: "call_dsh_agent", sessionID, callID: "call_dsh_2" }, output)
+
+    // then
+    expect(dispatchMock).toHaveBeenCalledTimes(1)
+    const args = dispatchMock.mock.calls[0]?.[0] as { source: string }
+    expect(args.source).toBe("v4-verification-gate")
+  })
+
+  test("#given a dsh agent completion with a non-zero exit code #when tool.execute.after runs #then dispatches a re-plan prompt", () => {
+    // given
+    dispatchMock.mockClear()
+    const hook = hookWith(makeConfig({ enabled: true }))
+    const sessionID = "ses_dsh_exit"
+
+    registerV4Session(hook, sessionID)
+
+    // when — clean text but failing exit code metadata
+    const output = { title: "dsh agent", output: "All done.", metadata: { exitCode: 1 } }
+    hook["tool.execute.after"]({ tool: "call_dsh_agent", sessionID, callID: "call_dsh_3" }, output)
+
+    // then
+    expect(dispatchMock).toHaveBeenCalledTimes(1)
+  })
+
+  test("#given a dsh agent completion with clean metadata #when tool.execute.after runs #then no re-plan dispatch", () => {
+    // given
+    dispatchMock.mockClear()
+    const hook = hookWith(makeConfig({ enabled: true }))
+    const sessionID = "ses_dsh_clean"
+
+    registerV4Session(hook, sessionID)
+
+    // when
+    const output = { title: "dsh agent", output: "All green.", metadata: { stopReason: "end_turn", exitCode: 0 } }
+    hook["tool.execute.after"]({ tool: "call_dsh_agent", sessionID, callID: "call_dsh_4" }, output)
+
+    // then
+    expect(dispatchMock).not.toHaveBeenCalled()
+  })
 })

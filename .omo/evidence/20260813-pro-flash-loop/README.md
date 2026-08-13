@@ -38,3 +38,19 @@ dispatchInternalPrompt machinery.
 # ALSO ON THIS BRANCH
 - Merged latest dev (391 commits) — resolves memory-core workspace drift and keeps
   the branch mergeable; regenerated nothing (no bundle-touching changes here).
+
+# UPDATE: A + B — gate watches call_dsh_agent + metadata failure signals
+
+**WHAT WAS TESTED:** (A) the gate's DELEGATION_TOOLS now includes
+call_dsh_agent, so dsh results get the same verification treatment as
+task/call_omo_agent. (B) the gate now treats tool metadata as failure
+evidence, not just text heuristics: stopReason error/refusal/cancelled and
+non-zero exitCode both trigger the re-plan dispatch even when the output text
+is clean.
+
+**WHAT WAS OBSERVED:**
+1. `bun test packages/omo-opencode/src/hooks/v4-verification-gate/` -> 13 pass
+   / 0 fail. New tests: call_dsh_agent is a delegated tool (reminder appended,
+   no dispatch on clean metadata); stopReason=error with clean text -> dispatch;
+   exitCode=1 with clean text -> dispatch; end_turn + exitCode 0 -> no dispatch.
+2. `bun run typecheck` -> exit 0.
