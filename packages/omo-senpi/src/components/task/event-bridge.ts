@@ -7,6 +7,7 @@ import type { LiveTaskContext } from "./runtime-context"
 import { wireReloadGuard } from "./reload-guard"
 import type { SessionTransitionBridge } from "./session-transition-bridge"
 import type { TaskStatusUi } from "./status-ui"
+import { wireTaskRpcBridge } from "./task-rpc-bridge"
 import { createOncePerSessionGuard, TASK_USAGE_GUIDANCE } from "./usage-guidance"
 
 export const TASK_USAGE_HINT_FLAG = "omo-task-usage-hint"
@@ -32,6 +33,8 @@ export function wireEventBridge(
   state: EventBridgeState,
 ): void {
   const guidanceGuard = createOncePerSessionGuard()
+  const taskRpc = wireTaskRpcBridge(pi, engine)
+  const unsubscribeTaskSnapshots = engine.onStoreMutation(() => taskRpc.sync())
   wireReloadGuard(pi, engine.manager)
 
   pi.on("session_start", async (_payload, eventCtx) => {
@@ -57,9 +60,11 @@ export function wireEventBridge(
     }
     await tickLeadPollersBestEffort(ctx, state)
     statusUi.scheduleSync()
+    taskRpc.attach()
   })
 
   pi.on("session_before_switch", (_payload, eventCtx) => {
+    taskRpc.detach()
     engine.runtime.captureFrom(asLiveContext(eventCtx))
     transitions.onBeforeSwitch(engine.runtime.sessionId())
     engine.runtime.clearUi()
@@ -77,6 +82,8 @@ export function wireEventBridge(
   })
 
   pi.on("session_shutdown", async (payload, eventCtx) => {
+    unsubscribeTaskSnapshots()
+    taskRpc.dispose()
     engine.runtime.captureFrom(asLiveContext(eventCtx))
     transitions.onShutdown(engine.runtime.sessionId())
     engine.runtime.clearUi()
