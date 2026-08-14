@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises"
+import { mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -15,9 +15,9 @@ import { OmoMemorySettingsSchema, type OmoConfig } from "@oh-my-opencode/omo-con
 import type { SenpiModelPort } from "@oh-my-opencode/senpi-task"
 
 import type { SenpiOmoConfigResult } from "../../config-resolution"
+import type { ResolveAndPreflightMemoryLaunch } from "./memory-launch-preflight"
 import type {
   ReflectionCompletionApi,
-  ReflectionCompletionRecord,
 } from "./completion"
 import { SenpiSubprocessRunner } from "./runner"
 import type { ReflectionSpawnArgs } from "./spawn"
@@ -26,19 +26,23 @@ export class CapturedCompletionApi implements ReflectionCompletionApi {
   readonly entries: Array<{ customType: string; data: unknown }> = []
   readonly renderers: Array<{
     customType: string
-    renderer: EntryRenderer<ReflectionCompletionRecord>
+    renderer: EntryRenderer<unknown>
   }> = []
 
   appendEntry<T = unknown>(customType: string, data?: T): void {
     this.entries.push({ customType, data })
   }
 
-  registerEntryRenderer(
+  registerEntryRenderer<T>(
     customType: string,
-    renderer: EntryRenderer<ReflectionCompletionRecord>,
+    renderer: EntryRenderer<T>,
   ): void {
-    this.renderers.push({ customType, renderer })
+    this.renderers.push({ customType, renderer: renderer as EntryRenderer<unknown> })
   }
+}
+
+export type HarnessModel = SenpiModelPort & {
+  readonly cost?: { readonly input: number; readonly cacheRead?: number; readonly output?: number }
 }
 
 export interface RunnerHarness {
@@ -51,6 +55,7 @@ export interface RunnerHarness {
   readonly api: CapturedCompletionApi
   readonly notifications: Array<{ message: string; level: string }>
   readonly spawnCalls: ReflectionSpawnArgs[]
+  readonly preflightProbeLog: string
   reserveAgain(): Promise<ReservedRun>
 }
 
@@ -58,12 +63,19 @@ const childFixture = join(import.meta.dir, "__fixtures__", "reflection-child.ts"
 const supervisorFixture = join(import.meta.dir, "memory-run-supervisor.ts")
 
 export async function createRunnerHarness(options: {
-  readonly childMode: "commit" | "timeout" | "admin" | "model-fallback"
+  readonly childMode: "commit" | "timeout" | "admin" | "model-fallback" | "model-exhausted"
   readonly categoryAvailable?: boolean
   readonly config?: OmoConfig
-  readonly models?: readonly SenpiModelPort[]
+  readonly models?: readonly HarnessModel[]
+  readonly preflightModels?: readonly HarnessModel[]
   readonly deadlineMs?: number
   readonly terminationGraceMs?: number
+  readonly now?: () => Date
+  readonly resolveAndPreflightLaunch?: ResolveAndPreflightMemoryLaunch
+  readonly resolveSessionModel?: () => { readonly provider: string; readonly id: string; readonly thinking?: string } | undefined
+  readonly resolveParentContextTokens?: () => number | undefined
+  readonly resolveParentSessionFile?: () => string | undefined
+  readonly resolveParentCacheReusable?: () => boolean
 }): Promise<RunnerHarness> {
   const root = await mkdtemp(join(tmpdir(), "memory-reflection-worker-"))
   const identity: MemoryIdentity = {
@@ -105,7 +117,7 @@ export async function createRunnerHarness(options: {
     { provider: "kimi-coding", id: "fallback" },
   ]
   const models = options.models
-    ?? (options.childMode === "model-fallback" ? fallbackModels : [model])
+    ?? (options.childMode === "model-fallback" || options.childMode === "model-exhausted" ? fallbackModels : [model])
   const categoryAvailable = options.categoryAvailable ?? true
   const memory = OmoMemorySettingsSchema.parse({
     reflection: { category: "quick", timeout_minutes: 15, merge: "auto" },
@@ -114,7 +126,7 @@ export async function createRunnerHarness(options: {
     memory,
     categories: categoryAvailable
       ? {
-          quick: options.childMode === "model-fallback"
+          quick: options.childMode === "model-fallback" || options.childMode === "model-exhausted"
             ? {
                 models: [
                   { model: "extension-only/primary", reasoning: "off" },
@@ -126,6 +138,13 @@ export async function createRunnerHarness(options: {
       : {},
   }
   const loaded: SenpiOmoConfigResult = { config, diagnostics: [], layers: [], sources: [] }
+  const senpiLauncher = join(root, "fake-senpi.mjs")
+  const preflightProbeLog = join(root, "preflight-probes.log")
+  await writeFile(
+    senpiLauncher,
+    `import { appendFileSync } from "node:fs"\nappendFileSync(${JSON.stringify(preflightProbeLog)}, "probe\\n")\nprocess.stdout.write(${JSON.stringify(`${(options.preflightModels ?? models).map((candidate) => `${candidate.provider}/${candidate.id}`).join("\n")}\n`)})\n`,
+    "utf8",
+  )
   const api = new CapturedCompletionApi()
   const notifications: Array<{ message: string; level: string }> = []
   const spawnCalls: ReflectionSpawnArgs[] = []
@@ -142,7 +161,19 @@ export async function createRunnerHarness(options: {
     cwd: root,
     deadlineMs: options.deadlineMs,
     terminationGraceMs: options.terminationGraceMs,
+    now: options.now,
     supervisorPath: supervisorFixture,
+    senpiCommand: process.execPath,
+    senpiPrefixArgs: [senpiLauncher],
+    resolveAndPreflightLaunch: options.resolveAndPreflightLaunch,
+    ...(options.resolveSessionModel === undefined ? {} : { resolveSessionModel: options.resolveSessionModel }),
+    ...(options.resolveParentContextTokens === undefined ? {} : { resolveParentContextTokens: options.resolveParentContextTokens }),
+    ...(options.resolveParentSessionFile === undefined ? {} : { resolveParentSessionFile: options.resolveParentSessionFile }),
+    ...(options.resolveParentCacheReusable === undefined ? {} : { resolveParentCacheReusable: options.resolveParentCacheReusable }),
+    getTranscriptState: (conversationId) => {
+      if (conversationId !== "conversation-a") throw new Error(`unknown conversation: ${conversationId}`)
+      return journal.getState()
+    },
     liveSession: () => ({
       sessionId: "conversation-a",
       api,
@@ -152,7 +183,9 @@ export async function createRunnerHarness(options: {
       spawnCalls.push(spawnArgs)
       const mode = options.childMode === "model-fallback"
         ? spawnArgs.args.includes("extension-only/primary") ? "model-not-found" : "commit"
-        : options.childMode
+        : options.childMode === "model-exhausted"
+          ? spawnArgs.args.includes("extension-only/primary") ? "model-not-found" : "auth-missing"
+          : options.childMode
       return {
         ...spawnArgs,
         command: process.execPath,
@@ -171,6 +204,7 @@ export async function createRunnerHarness(options: {
     api,
     notifications,
     spawnCalls,
+    preflightProbeLog,
     reserveAgain: async () => {
       const snapshot = await journal.captureReflectionSnapshot()
       if (!snapshot) throw new Error("expected another reflection snapshot")

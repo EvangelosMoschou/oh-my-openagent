@@ -1,9 +1,11 @@
-import type { MemoryIdentity, ReflectionOutcome, ReservedRun } from "@oh-my-opencode/memory-core"
+import type { MemoryIdentity, ReflectionOutcome, ReflectionTranscriptState, ReservedRun } from "@oh-my-opencode/memory-core"
 import type { SenpiModelPort, SenpiModelRegistryPort } from "@oh-my-opencode/senpi-task"
 
 import type { SenpiOmoConfigResult } from "../../config-resolution"
+import type { ComponentLogger } from "../../../extension/types"
 import type { ReflectionCompletionRecord, ReflectionLiveSession } from "./completion"
-import type { ReflectionThinkingLevel } from "./resolve-model"
+import type { ResolveAndPreflightMemoryLaunch } from "./memory-launch-preflight"
+import type { ReflectionSessionModel, ReflectionThinkingLevel } from "./resolve-model"
 import type { ReflectionSandbox } from "./spawn"
 
 export interface ReflectionReservationPort {
@@ -30,7 +32,12 @@ export interface ReflectionRunner {
 export interface SenpiSubprocessRunnerOptions {
   readonly identity: MemoryIdentity
   readonly reservation: ReflectionReservationPort
+  readonly logger?: ComponentLogger
   readonly resolveModelRegistry: () => SenpiModelRegistryPort<SenpiModelPort> | undefined
+  readonly resolveSessionModel?: () => ReflectionSessionModel | undefined
+  readonly resolveParentContextTokens?: () => number | undefined
+  readonly resolveParentSessionFile?: () => string | undefined
+  readonly resolveParentCacheReusable?: () => boolean
   readonly loadConfig?: (options?: { readonly cwd?: string }) => SenpiOmoConfigResult
   readonly cwd?: string
   readonly env?: NodeJS.ProcessEnv
@@ -39,8 +46,11 @@ export interface SenpiSubprocessRunnerOptions {
   readonly maxOutputBytes?: number
   readonly sandbox?: ReflectionSandbox
   readonly liveSession?: () => ReflectionLiveSession | undefined
+  readonly getTranscriptState?: (conversationId: string) => Promise<ReflectionTranscriptState>
   readonly now?: () => Date
   readonly senpiCommand?: string
+  readonly senpiPrefixArgs?: readonly string[]
+  readonly resolveAndPreflightLaunch?: ResolveAndPreflightMemoryLaunch
   readonly supervisorPath?: string
   readonly withWriterLock?: <T>(operation: () => Promise<T>) => Promise<T>
 }

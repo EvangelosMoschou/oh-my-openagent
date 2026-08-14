@@ -1,10 +1,6 @@
-import { join } from "node:path"
-
 import { MemoryBlockCache } from "@oh-my-opencode/memory-core"
 
 import type { ComponentContext, SenpiExtensionAPI } from "../../extension/types"
-import { hasMemoryCapabilities } from "./capabilities"
-import type { MemoryIdentityContext } from "./context"
 import { createDreamTriggerWiring, resolveDreamTriggerSettings } from "./dream-trigger"
 import { resolveMemorySettings } from "./identity-runtime"
 import { createMemoryNudgeWiring } from "./nudge-wiring"
@@ -13,13 +9,12 @@ import { registerMemoryFilesystemPolicy } from "./policy-guard"
 import { createShutdownDrain, type ShutdownDrainInput, type ShutdownEvaluator } from "./shutdown-drain"
 import { type SkillsUsageTracker } from "./skills-usage"
 import { createSoulNoticeWiring } from "./soul-notice"
-import { MEMORY_STATUS_KEY, refreshMemoryStatus } from "./status"
+import { branchEntryCount } from "./wiring-context"
 import {
-  consumePendingReflectionCompletions,
-  type ReflectionCompletionApi,
-} from "./worker"
-import { branchEntryCount, readUi } from "./wiring-context"
-import { createMemoryRuntimeWiring } from "./wiring-runtime"
+  createMemoryReflectionLiveWiring,
+  createReflectionCompletionApi,
+} from "./wiring-reflection-live"
+import { createMemoryRuntimeWiring, type MemoryRuntimeWiring } from "./wiring-runtime"
 import { registerMemoryStatic } from "./wiring-static"
 import type { MemoryCommandSettings } from "./commands/types"
 import type { MemoryWiring, MemoryWiringOptions } from "./wiring-types"
@@ -31,7 +26,16 @@ export function createMemoryWiring(options: MemoryWiringOptions): MemoryWiring {
   const lastEventCtx: { current?: unknown } = {}
   const activeSession: { current?: string } = {}
   const skillsUsageTrackersRef: { current: Map<string, SkillsUsageTracker> } = { current: new Map() }
-  const runtimeWiring = createMemoryRuntimeWiring(options, lastEventCtx)
+  const reflectionLive = createMemoryReflectionLiveWiring(options, activeSession, lastEventCtx)
+  const runtimeWiring = createMemoryRuntimeWiring(
+    options,
+    lastEventCtx,
+    reflectionLive.currentSession,
+    {
+      onLaunch: reflectionLive.onReflectionLaunched,
+      onLiveCompletion: reflectionLive.onLiveReflectionCompleted,
+    },
+  )
   const { resolveContext, journalWiringFor, factsWiringFor, runtimeFor } = runtimeWiring
 
   const nudgeWiring = createMemoryNudgeWiring({
@@ -86,31 +90,9 @@ export function createMemoryWiring(options: MemoryWiringOptions): MemoryWiring {
     },
   })
 
-  const dreamTriggerWiring = createDreamTriggerWiring({
-    resolveSession: (eventCtx) => runtimeWiring.dreamSessionFor(eventCtx),
-    resolveActiveSession: () => (activeSession.current === undefined ? undefined : runtimeWiring.dreamSessionById(activeSession.current)),
-    resolveSessionById: runtimeWiring.dreamSessionById,
-    resolveSettings: (identity) => {
-      const settings = resolveMemorySettings(options.loadConfig({ cwd: options.cwd() }).config.memory)
-      return resolveDreamTriggerSettings(settings, identity)
-    },
-    ...(options.logger === undefined ? {} : { logger: options.logger }),
-  })
+  const dreamTriggerWiring = buildDreamTriggerWiring(options, runtimeWiring, activeSession)
   shutdownDrain.registerEvaluator(dreamTriggerWiring.shutdownEvaluator())
 
-  function completionApi(pi: SenpiExtensionAPI): ReflectionCompletionApi | undefined {
-    if (!hasMemoryCapabilities(pi)) return undefined
-    return {
-      appendEntry: (customType, data) => {
-        pi.appendEntry(customType, data)
-      },
-      registerEntryRenderer: (customType, renderer) => {
-        pi.registerEntryRenderer(customType, renderer)
-      },
-    }
-  }
-
-  /** Palace people-panel gate using the resolved `memory.people` settings. */
   function resolvePalacePeople(): PalacePeopleOptions | undefined {
     const people = resolveMemorySettings(options.loadConfig({ cwd: options.cwd() }).config.memory).people
     return {
@@ -126,6 +108,7 @@ export function createMemoryWiring(options: MemoryWiringOptions): MemoryWiring {
 
   return {
     registerStatic(pi: SenpiExtensionAPI, ctx: ComponentContext): void {
+      reflectionLive.registerRpc(pi, resolveContext)
       registerMemoryStatic({
         pi,
         ctx,
@@ -134,7 +117,7 @@ export function createMemoryWiring(options: MemoryWiringOptions): MemoryWiring {
         nudgeWiring,
         soulNoticeWiring,
         dreamTriggerWiring,
-        completionApi,
+        completionApi: createReflectionCompletionApi,
         resolveContext,
         journalWiringFor,
         factsWiringFor,
@@ -145,35 +128,23 @@ export function createMemoryWiring(options: MemoryWiringOptions): MemoryWiring {
         lastEventCtx,
         activeSession,
         skillsUsageTrackersRef,
+        onReflectionLaunch: reflectionLive.onReflectionLaunched,
+        onSettled: reflectionLive.onSettled,
+        onMemoryWrite: reflectionLive.syncRpc,
       })
     },
 
-    async afterBind(pi: SenpiExtensionAPI, sessionId: string, identity: MemoryIdentityContext, eventCtx: unknown): Promise<void> {
+    async afterBind(pi, sessionId, identity, eventCtx): Promise<void> {
       activeSession.current = sessionId
       lastEventCtx.current = eventCtx
+      reflectionLive.attach(sessionId)
       registerMemoryFilesystemPolicy(pi, identity)
       await runtimeFor(identity).reconcile()
       if (branchEntryCount(eventCtx) > 0) {
         await journalWiringFor(identity).reconcileSession(eventCtx)
       }
       factsWiringFor(identity).reconcileExtractor()
-      const ui = readUi(eventCtx)
-      if (ui !== undefined) {
-        const settings = resolveMemorySettings(options.loadConfig({ cwd: options.cwd() }).config.memory)
-        void refreshMemoryStatus({
-          context: identity,
-          ui,
-          compileWarnTokens: settings.compile_warn_tokens,
-          alreadyNotified: false,
-        }).catch(() => {})
-      }
-      const api = completionApi(pi)
-      if (api !== undefined) {
-        void consumePendingReflectionCompletions(
-          join(identity.identityPaths.reflection, "completions"),
-          { sessionId, api },
-        ).catch(() => {})
-      }
+      await reflectionLive.bind(pi, sessionId, identity, eventCtx)
     },
 
     async flushSkillsUsage(): Promise<void> {
@@ -181,6 +152,7 @@ export function createMemoryWiring(options: MemoryWiringOptions): MemoryWiring {
     },
 
     async onSessionShutdown(input: ShutdownDrainInput): Promise<void> {
+      reflectionLive.shutdown(options.sessions.get(input.sessionId)?.context?.identity)
       await shutdownDrain.run(input)
     },
 
@@ -189,7 +161,26 @@ export function createMemoryWiring(options: MemoryWiringOptions): MemoryWiring {
     },
 
     clearStatus(eventCtx: unknown): void {
-      readUi(eventCtx)?.setStatus(MEMORY_STATUS_KEY, undefined)
+      reflectionLive.clearStatus(eventCtx)
     },
   }
+}
+
+function buildDreamTriggerWiring(
+  options: MemoryWiringOptions,
+  runtimeWiring: MemoryRuntimeWiring,
+  activeSession: { current?: string },
+) {
+  return createDreamTriggerWiring({
+    resolveSession: (eventCtx) => runtimeWiring.dreamSessionFor(eventCtx),
+    resolveActiveSession: () => activeSession.current === undefined
+      ? undefined
+      : runtimeWiring.dreamSessionById(activeSession.current),
+    resolveSessionById: runtimeWiring.dreamSessionById,
+    resolveSettings: (identity) => {
+      const settings = resolveMemorySettings(options.loadConfig({ cwd: options.cwd() }).config.memory)
+      return resolveDreamTriggerSettings(settings, identity)
+    },
+    ...(options.logger === undefined ? {} : { logger: options.logger }),
+  })
 }

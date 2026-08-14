@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { basename, dirname, join } from "node:path"
 
 import type { FactsSpawnArgs, ReflectionSpawnArgs } from "./worker/spawn"
 import {
@@ -90,6 +90,8 @@ function build(policy: SandboxPolicy, options: {
       worktreeDir: setup.worktree,
       gitCommonDir: setup.gitCommonDir,
       payloadPaths: setup.payloadPaths,
+      command: "/bin/sh",
+      env: { PATH: process.env.PATH },
       platform: options.platform,
       which: options.which,
     }),
@@ -131,6 +133,8 @@ describe("reflection worker OS sandbox", () => {
       gitCommonDir: setup.gitCommonDir,
       payloadPaths: setup.payloadPaths,
       foreignRoots: [foreignRoot],
+      command: "/bin/sh",
+      env: { PATH: process.env.PATH },
       platform: "darwin",
       which: () => "/usr/bin/sandbox-exec",
     })
@@ -154,6 +158,8 @@ describe("reflection worker OS sandbox", () => {
       worktreeDir: setup.worktree,
       gitCommonDir: setup.gitCommonDir,
       payloadPaths: setup.payloadPaths,
+      command: "/bin/sh",
+      env: { PATH: process.env.PATH },
       platform: "darwin",
       which: () => "/usr/bin/sandbox-exec",
     })
@@ -189,6 +195,59 @@ describe("reflection worker OS sandbox", () => {
     ])
   }, 30_000)
 
+  test("#given a bare inner command available on the child PATH #when sandbox arguments are transformed #then the wrapper receives its absolute path", () => {
+    // given
+    const setup = fixture()
+    const original = {
+      ...spawnArgs(setup.worktree),
+      command: basename(process.execPath),
+      env: { PATH: dirname(process.execPath) },
+    }
+    const transform = buildSandboxTransform({
+      policy: "required",
+      worktreeDir: setup.worktree,
+      gitCommonDir: setup.gitCommonDir,
+      payloadPaths: setup.payloadPaths,
+      command: original.command,
+      env: original.env,
+      platform: "linux",
+      which: () => "/usr/bin/bwrap",
+    })
+
+    // when
+    const transformed = transform(original)
+
+    // then
+    expect(transformed.command).toBe("/usr/bin/bwrap")
+    expect(transformed.args.slice(-4)).toEqual(["--", process.execPath, "-c", "exit 0"])
+  }, 30_000)
+
+  test("#given a bare inner command missing from the child PATH #when sandbox arguments are transformed #then it degrades to identity with an explicit warning", () => {
+    // given
+    const setup = fixture()
+    const original = { ...spawnArgs(setup.worktree), command: "missing-senpi", env: { PATH: "" } }
+    const transform = buildSandboxTransform({
+      policy: "required",
+      worktreeDir: setup.worktree,
+      gitCommonDir: setup.gitCommonDir,
+      payloadPaths: setup.payloadPaths,
+      command: original.command,
+      env: original.env,
+      platform: "linux",
+      which: () => "/usr/bin/bwrap",
+    })
+
+    // when
+    const wasSandboxedBeforeSpawn = transform.wasSandboxed
+    const transformed = transform(original)
+
+    // then
+    expect(wasSandboxedBeforeSpawn).toBe(false)
+    expect(transformed).toBe(original)
+    expect(transform.wasSandboxed).toBe(false)
+    expect(transform.warning).toContain('inner command "missing-senpi" is not absolute and could not be resolved')
+  }, 30_000)
+
   test("#given required policy without a platform sandbox #when the transform is built #then a typed unavailable error is thrown", () => {
     // given
     const setup = fixture()
@@ -199,6 +258,8 @@ describe("reflection worker OS sandbox", () => {
       worktreeDir: setup.worktree,
       gitCommonDir: setup.gitCommonDir,
       payloadPaths: setup.payloadPaths,
+      command: "/bin/sh",
+      env: { PATH: process.env.PATH },
       platform: "linux",
       which: () => undefined,
     })
@@ -264,5 +325,27 @@ describe("facts worker OS sandbox", () => {
       "--chdir", runDir,
       "--", "/bin/sh", "-c", "exit 0",
     ])
+  }, 30_000)
+
+  test("#given a missing facts inner command #when the transform is built #then its warning names the facts surface", async () => {
+    // given
+    const root = mkdtempSync(join(tmpdir(), "omo-memory-facts-sandbox-"))
+    roots.push(root)
+    const runDir = join(root, "runtime", "facts", "runs", "run-1")
+    mkdirSync(runDir, { recursive: true })
+    writeFileSync(join(runDir, "facts-payload.json"), "{}")
+    let warning: string | undefined
+    const transform = buildFactsSandboxTransform({
+      policy: "required",
+      platform: "linux",
+      which: () => "/usr/bin/bwrap",
+      onWarning: (value) => { warning = value },
+    })
+
+    // when
+    await transform({ ...factsSpawnArgs(runDir), command: "missing-senpi", env: { PATH: "" } })
+
+    // then
+    expect(warning).toBe('facts sandbox unavailable: inner command "missing-senpi" is not absolute and could not be resolved; running unsandboxed')
   }, 30_000)
 })

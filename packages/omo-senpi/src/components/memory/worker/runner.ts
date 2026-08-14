@@ -1,42 +1,37 @@
-import { existsSync } from "node:fs"
 import { join } from "node:path"
 
 import type { OmoConfig } from "@oh-my-opencode/omo-config-core"
-import {
-  GitMemoryRepo,
-  buildDefaultSeedFiles,
-  cleanupReflectionWorktree,
-  installHooks,
-  type ReflectionFinalizeResult,
-  type ReflectionWorktree,
-  type ReservedRun,
-} from "@oh-my-opencode/memory-core"
+import type { ReservedRun } from "@oh-my-opencode/memory-core"
 import { loadSenpiOmoConfig, type SenpiOmoConfigResult } from "../../config-resolution"
 import { resolveAgentReflectionSettings } from "../reflection-settings"
 import { createOncePerSessionGuard } from "../../task/usage-guidance"
 import {
-  recordReflectionCompletion,
+  REFLECTION_LAUNCHED_ENTRY_TYPE,
   registerReflectionCompletionRenderer,
-  type ReflectionCompletionRecord,
+  safeNotify,
   type ReflectionLiveSession,
 } from "./completion"
+import {
+  chooseMemoryLaunchRoute,
+  MEMORY_WORKLOAD_PROFILES,
+  type MemoryLaunchRoute,
+  type MemoryLaunchSurface,
+} from "./fork-cost"
+import { readModelPricing } from "./registry-fallback"
 import {
   resolveReflectionModel,
   shouldWarnCategoryUnavailable,
   type ReflectionModelResolution,
+  type ReflectionSessionModel,
 } from "./resolve-model"
-import {
-  runMemoryModelAttempts,
-  type MemoryModelChain,
-} from "./memory-model-attempts"
-import { createRunWorktree } from "./create-run-worktree"
-import { prepareReflectionCandidateSpawn } from "./reflection-spawn-input"
 import { readRunJson } from "./run-artifacts"
-import { failReservationRun, finalizeRecordedOutcome } from "./run-finalization"
 import type { RunFinalizationContext } from "./run-finalization-types"
 import { parseReservationRunLedger } from "./reservation-run-ledger"
-import { requireFinalizedResult } from "./runner-finalization-result"
-import { runReflectionChild } from "./spawn"
+import {
+  publishFinalizedReflectionRun,
+  settleReflectionRun,
+} from "./runner-completion-publication"
+import { executeReflectionRun } from "./runner-execution"
 
 export type {
   ReflectionReservationPort,
@@ -45,13 +40,31 @@ export type {
   SenpiSubprocessRunnerOptions,
 } from "./runner-types"
 
-import { cleanupSucceeded, errorMessage } from "./runner-results"
 import type { ExecutionResult, ReflectionRunResult, ReflectionRunner, SenpiSubprocessRunnerOptions } from "./runner-types"
+
+function quickCandidateCost(model: string, registry: ReturnType<SenpiSubprocessRunnerOptions["resolveModelRegistry"]>) {
+  if (registry === undefined) return undefined
+  const separator = model.indexOf("/")
+  if (separator <= 0) return undefined
+  return readModelPricing(registry.find(model.slice(0, separator), model.slice(separator + 1)))
+}
+
+// missing_providers rides the failure detail so the health fingerprint and the remediation hint
+// can name what to connect; the fingerprint truncates at 60 chars, keeping it stable.
+function categoryUnavailableDetail(
+  category: string,
+  resolution: Extract<ReflectionModelResolution, { readonly kind: "category_unavailable" }>,
+): string {
+  const base = `Reflection category "${category}" could not resolve a usable model (cause: ${resolution.cause})`
+  const providers = resolution.missingProviders?.join(", ")
+  return providers === undefined || providers.length === 0 ? base : `${base}; missing providers: ${providers}`
+}
 
 export class SenpiSubprocessRunner implements ReflectionRunner {
   private readonly loadConfig: (options?: { readonly cwd?: string }) => SenpiOmoConfigResult
   private readonly now: () => Date
   private readonly warnedCategory = createOncePerSessionGuard()
+  private readonly warnedHealth = createOncePerSessionGuard()
   private readonly registeredApis = new WeakSet<object>()
 
   constructor(private readonly options: SenpiSubprocessRunnerOptions) {
@@ -66,151 +79,145 @@ export class SenpiSubprocessRunner implements ReflectionRunner {
     const loaded = this.loadConfig({ cwd })
     const reflection = resolveAgentReflectionSettings(loaded.config.memory, this.options.identity.id)
     const category = reflection.category
-    const resolution = resolveReflectionModel(category, loaded.config, this.options.resolveModelRegistry())
+    const registry = this.options.resolveModelRegistry()
+    const sessionModel = this.options.resolveSessionModel?.()
+    const resolution = resolveReflectionModel(category, loaded.config, registry, {
+      ...(sessionModel === undefined ? {} : { sessionModel }),
+    })
 
     if (resolution.kind === "category_unavailable") {
       this.notifyCategoryUnavailable(loaded.config, resolution)
       return this.settle(run, {
         outcome: "failed",
         reason: "category_unavailable",
-        detail: `Reflection category "${category}" could not resolve a usable model (cause: ${resolution.cause})`,
+        detail: categoryUnavailableDetail(category, resolution),
       }, startedAt, resolution, true)
     }
 
-    const execution = await this.execute(run, resolution, loaded)
+    const route = this.chooseLaunchRoute(run, resolution, registry, sessionModel)
+
+    const execution = await executeReflectionRun({
+      run,
+      resolution,
+      route,
+      loaded,
+      startedAt,
+      options: this.options,
+      now: () => this.now().getTime(),
+      finalizationContext: () => this.finalizationContext(),
+      appendLaunched: () => this.appendLaunched(run, resolution, startedAt),
+    })
     if ("runId" in execution) return this.deliverFinalized(execution)
-    const settled = await this.settle(run, execution, startedAt, resolution, false)
-    return settled
+    return this.settle(run, execution, startedAt, resolution, false)
   }
 
-  private async execute(
+  // Fork-vs-quick is orthogonal to category resolution: even a user with a working quick chain
+  // should fork when the session model's cache reads are cheap and the job is short. The resolved
+  // quick candidate is compared against fork+inherit on measured per-turn cost; facts never forks.
+  private chooseLaunchRoute(
     run: ReservedRun,
     resolution: Extract<ReflectionModelResolution, { readonly kind: "resolved" }>,
-    loaded: SenpiOmoConfigResult,
-  ): Promise<ExecutionResult | ReflectionRunResult> {
-    const repo = new GitMemoryRepo({ dir: this.options.identity.paths.repo, agentId: this.options.identity.id })
-    if (!existsSync(join(this.options.identity.paths.repo, ".git"))) {
-      await repo.init({ seedFiles: buildDefaultSeedFiles(), installHooks: (dir) => { installHooks(dir) } })
-    }
-    let worktree: ReflectionWorktree | undefined
-    try {
-      worktree = await createRunWorktree(repo, run.runId, this.options.identity.paths)
-      const activeWorktree = worktree
-      const reflection = resolveAgentReflectionSettings(loaded.config.memory, this.options.identity.id)
-      const merge = reflection.merge
-      const hardDeadlineAt = Date.now() + (this.options.deadlineMs ?? reflection.timeout_minutes * 60_000)
-      const candidates: MemoryModelChain = [
-        {
-          model: resolution.model,
-          ...(resolution.thinking === undefined ? {} : { thinking: resolution.thinking }),
-        },
-        ...resolution.fallbacks,
-      ]
-      await runMemoryModelAttempts(candidates, async (candidate, attemptNumber, nextAttempt) => {
-        const spawnArgs = await prepareReflectionCandidateSpawn({
-          run,
-          worktree: activeWorktree,
-          mergePolicy: merge,
-          category: reflection.category,
-          candidate,
-          attempt: attemptNumber,
-          hardDeadlineAt,
-          nextAttempt,
-          config: loaded.config,
-          identity: this.options.identity,
-          env: this.options.env ?? process.env,
-          senpiCommand: this.options.senpiCommand,
-        })
-        return runReflectionChild(spawnArgs, {
-          terminationGraceMs: this.options.terminationGraceMs,
-          maxOutputBytes: this.options.maxOutputBytes,
-          sandbox: this.options.sandbox,
-          supervisorPath: this.options.supervisorPath,
-        })
-      })
-    } catch (error) {
-      const runDir = join(this.options.identity.paths.reflection, "runs", run.runId)
-      if (existsSync(join(runDir, "ledger.json"))) {
-        const ledger = parseReservationRunLedger(await readRunJson<unknown>(join(runDir, "ledger.json")))
-        const finalized = await failReservationRun(
-          this.finalizationContext(),
-          runDir,
-          ledger,
-          "failed",
-          errorMessage(error),
-        )
-        return requireFinalizedResult(finalized)
-      }
-      const discarded = worktree === undefined ? undefined : await this.discard(worktree)
-      return {
-        outcome: "failed",
-        reason: discarded !== undefined && !cleanupSucceeded(discarded) ? "cleanup_failed" : "spawn_failed",
-        detail: [errorMessage(error), discarded?.detail].filter(Boolean).join("; "),
-      }
-    }
-    const runDir = join(this.options.identity.paths.reflection, "runs", run.runId)
-    const ledger = parseReservationRunLedger(await readRunJson<unknown>(join(runDir, "ledger.json")))
-    const finalized = await finalizeRecordedOutcome(this.finalizationContext(), runDir, ledger)
-    return requireFinalizedResult(finalized)
+    registry: ReturnType<SenpiSubprocessRunnerOptions["resolveModelRegistry"]>,
+    sessionModel: ReflectionSessionModel | undefined,
+  ): MemoryLaunchRoute {
+    const surface: MemoryLaunchSurface = run.request.trigger === "dream" ? "dream" : "reflection"
+    const quickCost = quickCandidateCost(resolution.model, registry)
+    const sessionCost = sessionModel === undefined || registry === undefined
+      ? undefined
+      : readModelPricing(registry.find(sessionModel.provider, sessionModel.id))
+    const parentContextTokens = this.options.resolveParentContextTokens?.()
+    return chooseMemoryLaunchRoute({
+      surface,
+      quick: {
+        model: resolution.model,
+        ...(resolution.thinking === undefined ? {} : { thinking: resolution.thinking }),
+        ...(quickCost === undefined ? {} : { cost: quickCost }),
+      },
+      ...(sessionModel === undefined || sessionCost === undefined
+        ? {}
+        : {
+            session: {
+              model: `${sessionModel.provider}/${sessionModel.id}`,
+              ...(sessionModel.thinking === undefined ? {} : { thinking: sessionModel.thinking }),
+              cost: sessionCost,
+            },
+          }),
+      ...(parentContextTokens === undefined ? {} : { parentContextTokens }),
+      turns: MEMORY_WORKLOAD_PROFILES[surface].turns,
+      cacheHit: this.options.resolveParentCacheReusable?.() ?? false,
+    })
   }
 
-  private async settle(
+  private settle(
     run: ReservedRun,
     result: ExecutionResult,
     startedAt: string,
     resolution: ReflectionModelResolution,
     suppressCompletionNotification: boolean,
   ): Promise<ReflectionRunResult> {
-    const transition = await this.options.reservation.complete(run.runId, result.outcome)
+    return settleReflectionRun({
+      run,
+      result,
+      startedAt,
+      resolution,
+      suppressCompletionNotification,
+      options: this.options,
+      now: this.now,
+      ensureRenderer: (live) => this.ensureRenderer(live),
+      warnedHealth: this.warnedHealth,
+    })
+  }
+
+  private deliverFinalized(result: ReflectionRunResult): Promise<ReflectionRunResult> {
+    return publishFinalizedReflectionRun({
+      result,
+      options: this.options,
+      ensureRenderer: (live) => this.ensureRenderer(live),
+      mergedMetadata: (runId) => this.mergedMetadata(runId),
+      warnedHealth: this.warnedHealth,
+    })
+  }
+
+  private async appendLaunched(
+    run: ReservedRun,
+    resolution: Extract<ReflectionModelResolution, { readonly kind: "resolved" }>,
+    startedAt: string,
+  ): Promise<void> {
     const live = this.options.liveSession?.()
-    this.ensureRenderer(live)
-    const record: ReflectionCompletionRecord = {
+    if (!live) return
+    const states = this.options.getTranscriptState === undefined
+      ? []
+      : await Promise.all(run.request.conversationIds.map((id) => this.options.getTranscriptState?.(id)))
+    const backlogSteps = states.reduce(
+      (sum, state) => sum + (state?.steps_since_last_successful_reflection ?? 0),
+      0,
+    )
+    live.api.appendEntry(REFLECTION_LAUNCHED_ENTRY_TYPE, {
       schemaVersion: 1,
       runId: run.runId,
       identity: this.options.identity.id,
-      category: resolution.category,
-      ...(resolution.kind === "resolved"
-        ? {
-            model: result.model ?? resolution.model,
-            ...(result.model === undefined
-              ? resolution.thinking === undefined ? {} : { thinking: resolution.thinking }
-              : result.thinking === undefined ? {} : { thinking: result.thinking }),
-          }
-        : {}),
-      conversationIds: run.request.conversationIds,
       trigger: run.request.trigger,
-      ...(run.request.trigger === "dream" ? { origin: run.request.origin } : {}),
-      outcome: result.outcome,
-      ...(result.reason === undefined ? {} : { reason: result.reason }),
-      ...(result.detail === undefined ? {} : { detail: result.detail }),
+      category: resolution.category,
+      model: resolution.model,
+      ...(resolution.thinking === undefined ? {} : { thinking: resolution.thinking }),
+      conversationIds: run.request.conversationIds,
+      backlogSteps,
       startedAt,
-      finishedAt: this.now().toISOString(),
-      delivery: { status: "pending" },
-    }
-    const completion = await recordReflectionCompletion(
-      join(this.options.identity.paths.reflection, "completions"),
-      record,
-      suppressCompletionNotification && live ? { sessionId: live.sessionId, api: live.api } : live,
-    )
-    return {
-      runId: run.runId,
-      outcome: result.outcome,
-      ...(result.reason === undefined ? {} : { reason: result.reason }),
-      ...(result.detail === undefined ? {} : { detail: result.detail }),
-      completion,
-      ...(transition.launch === undefined ? {} : { launch: transition.launch }),
-    }
+    })
   }
 
-  private async deliverFinalized(result: ReflectionRunResult): Promise<ReflectionRunResult> {
-    const live = this.options.liveSession?.()
-    this.ensureRenderer(live)
-    const completion = await recordReflectionCompletion(
-      join(this.options.identity.paths.reflection, "completions"),
-      result.completion,
-      live,
-    )
-    return { ...result, completion }
+  private async mergedMetadata(runId: string): Promise<{ mergedCommitSha?: string; filesChanged?: number }> {
+    try {
+      const ledger = parseReservationRunLedger(await readRunJson<unknown>(
+        join(this.options.identity.paths.reflection, "runs", runId, "ledger.json"),
+      ))
+      return {
+        ...(ledger.integrationSha === undefined ? {} : { mergedCommitSha: ledger.integrationSha }),
+        filesChanged: ledger.validatedChangedPaths?.length ?? 0,
+      }
+    } catch {
+      return {}
+    }
   }
 
   private notifyCategoryUnavailable(config: OmoConfig, resolution: Extract<ReflectionModelResolution, { readonly kind: "category_unavailable" }>): void {
@@ -218,7 +225,8 @@ export class SenpiSubprocessRunner implements ReflectionRunner {
     if (!live?.ui || !shouldWarnCategoryUnavailable(config, resolution.category)) return
     if (!this.warnedCategory(`${live.sessionId}:${resolution.category}`)) return
     const providers = resolution.missingProviders?.join(", ")
-    live.ui.notify(
+    safeNotify(
+      live,
       providers
         ? `Category "${resolution.category}" has no usable model: none of its fallback-chain providers are connected (${providers}).`
         : `Category "${resolution.category}" has no usable model for memory reflection.`,
@@ -230,11 +238,6 @@ export class SenpiSubprocessRunner implements ReflectionRunner {
     if (!live || this.registeredApis.has(live.api)) return
     registerReflectionCompletionRenderer(live.api)
     this.registeredApis.add(live.api)
-  }
-
-  private async discard(worktree: ReflectionWorktree): Promise<ReflectionFinalizeResult> {
-    const cleanup = await cleanupReflectionWorktree(worktree)
-    return { status: "failed", cleanup }
   }
 
   private finalizationContext(): RunFinalizationContext {
