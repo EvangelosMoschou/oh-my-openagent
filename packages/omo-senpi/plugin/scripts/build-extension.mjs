@@ -115,7 +115,7 @@ async function buildEntry(entry, output, buildDefines) {
   try {
     run("bun", [
       "build", entry, "--target", "node", "--format", "esm", "--outfile", output,
-      "--minify", `--metafile=${metafile}`,
+      "--minify-whitespace", `--metafile=${metafile}`,
       ...Object.entries(buildDefines).flatMap(([name, value]) => ["--define", `${name}=${JSON.stringify(value)}`]),
       ...externalSpecifiers.flatMap((specifier) => ["--external", specifier]),
     ])
