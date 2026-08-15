@@ -98,24 +98,35 @@ export function resolveModelForDelegateTask(
     ) {
       const providerHint = parsed?.providerHint
       const primaryMatch = fuzzyMatchModel(userResult.model, new Set(input.availableModels), providerHint)
-      if (!primaryMatch) {
-        for (const fallbackModel of userFallbackModels) {
-          const parsedFallback = parseUserFallbackModel(fallbackModel)
-          if (!parsedFallback) continue
-          const fbMatch = fuzzyMatchModel(
-            parsedFallback.baseModel,
-            new Set(input.availableModels),
-            parsedFallback.providerHint,
-          )
-          if (fbMatch) {
-            deps.log?.("[resolveModelForDelegateTask] user primary model unreachable; promoting user fallback_models entry", {
-              userPrimary: userResult.model,
-              selectedFallback: fbMatch,
-            })
-            return {
-              model: fbMatch,
-              variant: parsedFallback.variant,
-              matchedFallback: true,
+      if (primaryMatch === null) {
+        // An explicit user-configured primary must always win. fuzzyMatchModel
+        // returning null is "inconclusive" (format/alias/normalization edges),
+        // not "unavailable" — demoting the configured primary on inconclusive
+        // matching silently overrides explicit user intent. Fallbacks engage
+        // only when the primary is verifiably absent AND no available model
+        // can be resolved for it.
+        const primaryExact = Array.from(input.availableModels).some(
+          (available) => available === userResult.model,
+        )
+        if (!primaryExact) {
+          for (const fallbackModel of userFallbackModels) {
+            const parsedFallback = parseUserFallbackModel(fallbackModel)
+            if (!parsedFallback) continue
+            const fbMatch = fuzzyMatchModel(
+              parsedFallback.baseModel,
+              new Set(input.availableModels),
+              parsedFallback.providerHint,
+            )
+            if (fbMatch) {
+              deps.log?.("[resolveModelForDelegateTask] user primary model unreachable; promoting user fallback_models entry", {
+                userPrimary: userResult.model,
+                selectedFallback: fbMatch,
+              })
+              return {
+                model: fbMatch,
+                variant: parsedFallback.variant,
+                matchedFallback: true,
+              }
             }
           }
         }

@@ -52,6 +52,26 @@ describe("resolveModelForDelegateTask", () => {
     })
   })
 
+  test("#given a configured primary present in the available set #when fallback_models are also present #then the primary is kept (no demotion)", () => {
+    const result = resolveModelForDelegateTask({
+      userModel: "opencode-go/kimi-k3",
+      userFallbackModels: ["opencode-go/qwen3.7-plus"],
+      availableModels: new Set(["opencode-go/kimi-k3", "opencode-go/qwen3.7-plus"]),
+    }, noCacheDeps)
+
+    expect(result).toEqual({ model: "opencode-go/kimi-k3" })
+  })
+
+  test("#given a configured primary that fuzzy matching cannot confirm #when fallback_models are present #then the explicit primary still wins", () => {
+    const result = resolveModelForDelegateTask({
+      userModel: "opencode-go/kimi-k3",
+      userFallbackModels: ["opencode-go/qwen3.7-plus"],
+      availableModels: new Set(["opencode/qwen3.7-plus"]),
+    }, noCacheDeps)
+
+    expect(result).toEqual({ model: "opencode-go/kimi-k3" })
+  })
+
   test("#given connected providers cache #when fallback chain starts disconnected #then selects first connected provider", () => {
     const result = resolveModelForDelegateTask({
       availableModels: new Set(),
