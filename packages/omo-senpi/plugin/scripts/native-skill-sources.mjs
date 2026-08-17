@@ -26,6 +26,10 @@ export function createNativeSkillSources(repoRoot) {
   /** @type {SkillSource[]} */
   const sources = [
     {
+      name: "dsh-persona",
+      source: join(nativeSkillsRoot, "dsh-persona"),
+    },
+    {
       name: "give-me-tips",
       source: join(nativeSkillsRoot, "give-me-tips"),
     },

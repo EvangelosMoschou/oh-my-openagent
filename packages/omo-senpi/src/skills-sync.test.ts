@@ -11,6 +11,7 @@ const expectedSkillNames = [
   "coding-agent-sessions",
   "data-scientist",
   "debugging",
+  "dsh-persona",
   "frontend",
   "git-master",
   "give-me-tips",
@@ -35,6 +36,7 @@ const CODEX_DERIVED_SKILL_NAMES: Record<string, true> = {}
 // Skills authored directly against the omo-senpi tool surface. They already speak native Senpi tools,
 // so they carry no OpenCode examples and need no "Senpi Harness Tool Compatibility" translation banner.
 const NATIVE_SENPI_SKILL_NAMES: Record<string, true> = {
+  "dsh-persona": true,
   "give-me-tips": true,
   hyperplan: true,
   "init-deep": true,
