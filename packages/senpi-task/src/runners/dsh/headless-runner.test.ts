@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
 import { dirname, join } from "node:path"
 
@@ -11,7 +12,7 @@ function makeInput(overrides: Partial<Parameters<typeof runDshHeadless>[0]> = {}
   return {
     command: process.execPath,
     args: [fakeHeadless],
-    cwd: "/tmp",
+    cwd: tmpdir(),
     prompt: "build the thing",
     timeoutMs: 10000,
     abort: new AbortController().signal,

@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test"
+import { tmpdir } from "node:os"
 
 import { runVerificationGate } from "./verify"
 
 function makeInput(command: string, overrides: Partial<Parameters<typeof runVerificationGate>[0]> = {}) {
   return {
-    cwd: "/tmp",
+    cwd: tmpdir(),
     command,
     timeoutMs: 10000,
     abort: new AbortController().signal,

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
 import { dirname, join } from "node:path"
 
@@ -11,7 +12,7 @@ function makeInput(overrides: Partial<Parameters<typeof runDshAcpAgent>[0]> = {}
   return {
     command: process.execPath,
     args: [fakeServer],
-    cwd: "/tmp",
+    cwd: tmpdir(),
     prompt: "build the thing",
     permission: "reject" as const,
     timeoutMs: 10000,
