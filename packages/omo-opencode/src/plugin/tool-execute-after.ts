@@ -88,7 +88,7 @@ export function createToolExecuteAfterHandler(args: {
       tool: input.tool,
       sessionID: input.sessionID,
       callID: input.callID ?? input.callId ?? input.call_id ?? "",
-      ...(input.args === undefined ? {} : { args: input.args }),
+      args: input.args ?? {},
     }
 
     const nativeSessionId = getMetadataString(output.metadata, ["sessionId", "sessionID", "session_id"])
@@ -138,6 +138,7 @@ export function createToolExecuteAfterHandler(args: {
       await hooks.hashlineReadEnhancer?.["tool.execute.after"]?.(hookInput, output)
       await hooks.webfetchRedirectGuard?.["tool.execute.after"]?.(hookInput, output)
       await hooks.fsyncSkipWarning?.["tool.execute.after"]?.(hookInput, output)
+      await hooks.bashFileReadGuard?.["tool.execute.after"]?.(hookInput, output)
       await hooks.jsonErrorRecovery?.["tool.execute.after"]?.(hookInput, output)
       await hooks.planFormatValidator?.["tool.execute.after"]?.(hookInput, output)
     }
