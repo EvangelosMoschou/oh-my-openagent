@@ -252,6 +252,7 @@ export class BackgroundManager {
   private notifications: Map<string, BackgroundTask[]>
   private pendingNotifications: Map<string, string[]>
   private pendingByParent: Map<string, Set<string>>  // Track pending tasks per parent for batching
+  private notifiedTasks = new Set<string>()  // Tasks whose notifyParentSession actually executed (#6546)
   private client: OpencodeClient
   private directory: string
   private pollingInterval?: ReturnType<typeof setInterval>
@@ -1342,6 +1343,8 @@ The fallback retry session is now created and can be inspected directly.
     existingTask.status = "running"
     existingTask.completedAt = undefined
     existingTask.error = undefined
+    // Resume reopens a terminal task (#6546): clear the delivery guard so its next completion notifies again.
+    this.notifiedTasks.delete(existingTask.id)
     this.updateTaskParent(existingTask, input.parentSessionId)
     existingTask.parentMessageId = input.parentMessageId
     existingTask.parentModel = input.parentModel
@@ -2214,7 +2217,7 @@ The task was re-queued on a fallback model after a retryable failure.
   private markTerminalTaskForNotification(task: BackgroundTask): void {
     this.markForNotification(task)
     if (task.parentSessionId) {
-      this.reconcilePendingParentNotifications(task.parentSessionId)
+      this.reconcilePendingParentNotifications(task.parentSessionId, { excludeTaskId: task.id })
     }
   }
 
@@ -2339,14 +2342,20 @@ The task was re-queued on a fallback model after a retryable failure.
    * its completion notification never reached notifyParentSession (e.g. the
    * parent-wake dispatch was dropped downstream). Force the notification
    * through the serialized per-parent queue so the allComplete wake fires.
+   * Membership in `notifications` marks an ENQUEUED op, not a DELIVERED one,
+   * so it must not suppress the retry; `notifiedTasks` is the delivery truth.
    */
-  private reconcilePendingParentNotifications(parentSessionID: string): void {
+  private reconcilePendingParentNotifications(
+    parentSessionID: string,
+    options?: { excludeTaskId?: string }
+  ): void {
     const pending = this.pendingByParent.get(parentSessionID)
     if (!pending || pending.size === 0) return
     for (const taskId of [...pending]) {
+      if (taskId === options?.excludeTaskId) continue
       const task = this.tasks.get(taskId)
       if (!task || task.status === "running" || task.status === "pending") continue
-      if (this.notifications.get(parentSessionID)?.some(t => t.id === task.id)) continue
+      if (this.notifiedTasks.has(task.id)) continue
       log("[background-agent] Reconciliation: notifying terminal task still tracked pending:", {
         taskId,
         parentSessionID,
@@ -2392,6 +2401,7 @@ The task was re-queued on a fallback model after a retryable failure.
       }
 
       this.clearNotificationsForTask(taskId)
+      this.notifiedTasks.delete(taskId)
       this.removeTask(task)
       this.clearTaskHistoryWhenParentTasksGone(task.parentSessionId)
       if (task.sessionId) {
@@ -2652,6 +2662,15 @@ The task was re-queued on a fallback model after a retryable failure.
   }
 
   private async notifyParentSession(task: BackgroundTask): Promise<void> {
+    // Once-per-task delivery guard (#6546): reconciliation may re-enqueue a task
+    // whose original queued op was lost. Whichever op runs first delivers; any
+    // duplicate becomes a no-op so the parent is never injected twice.
+    if (this.notifiedTasks.has(task.id)) {
+      log("[background-agent] Skipping duplicate notifyParentSession:", { taskId: task.id })
+      return
+    }
+    this.notifiedTasks.add(task.id)
+
     const duration = formatDuration(task.startedAt ?? new Date(), task.completedAt)
 
     log("[background-agent] notifyParentSession called for task:", task.id)
@@ -3240,6 +3259,7 @@ The task was re-queued on a fallback model after a retryable failure.
     this.notifications.clear()
     this.pendingNotifications.clear()
     this.pendingByParent.clear()
+    this.notifiedTasks.clear()
     this.notificationQueueByParent.clear()
     this.rootDescendantCounts.clear()
     this.queuesByKey.clear()

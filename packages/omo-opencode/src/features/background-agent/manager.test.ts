@@ -2973,6 +2973,95 @@ describe("BackgroundManager.tryCompleteTask", () => {
     expect(promptBodies.some(body => body.body?.noReply === false)).toBe(true)
   })
 
+  test("#given a terminal task was marked but its queued notification never executed #when reconciliation runs #then the lost notification is delivered exactly once", async () => {
+    // given
+    type PromptAsyncBody = Record<string, unknown> & { noReply?: boolean }
+    const promptBodies: PromptAsyncBody[] = []
+    const client = {
+      session: {
+        prompt: async () => ({}),
+        promptAsync: async (body: PromptAsyncBody) => {
+          promptBodies.push(body)
+          return { data: {} }
+        },
+        abort: async () => ({}),
+        messages: async () => ({ data: [] }),
+        status: async () => ({ data: {} }),
+      },
+    }
+    manager.shutdown()
+    manager = new BackgroundManager({ pluginContext: createPluginInput(client) })
+
+    const parentSessionID = "parent-marked-but-lost"
+    const task = createMockTask({
+      id: "task-marked-lost",
+      parentSessionId: parentSessionID,
+      status: "completed",
+      completedAt: new Date(),
+    })
+    getTaskMap(manager).set(task.id, task)
+    getPendingByParent(manager).set(parentSessionID, new Set([task.id]))
+    // Simulate the exact #6546 review state: markForNotification ran (the marker
+    // exists) but the serialized op was lost before notifyParentSession executed.
+    manager.markForNotification(task)
+
+    // when — reconciliation fires while the stale marker sits in notifications
+    manager.handleEvent({ type: "session.idle", properties: { sessionID: parentSessionID } })
+    await waitForCoalescedFlush(manager, parentSessionID)
+    await waitUntil(() => getDispatchedParentWakes(manager).has(parentSessionID), 600)
+
+    // then — the marked-but-undelivered task is retried despite its marker
+    expect(getPendingByParent(manager).get(parentSessionID)).toBeUndefined()
+    const noReplyBodiesAfterFirstSweep = promptBodies.filter(body => body.body?.noReply === false).length
+    expect(noReplyBodiesAfterFirstSweep).toBe(1)
+
+    // and — a second sweep must not inject the wake a second time
+    manager.handleEvent({ type: "session.idle", properties: { sessionID: parentSessionID } })
+    await waitForCoalescedFlush(manager, parentSessionID)
+    expect(promptBodies.filter(body => body.body?.noReply === false).length).toBe(noReplyBodiesAfterFirstSweep)
+  })
+
+  test("#given two sweeps enqueue the same lost task before either op executes #when both ops run #then the once-per-task guard suppresses the duplicate wake", async () => {
+    // given
+    type PromptAsyncBody = Record<string, unknown> & { noReply?: boolean }
+    const promptBodies: PromptAsyncBody[] = []
+    const client = {
+      session: {
+        prompt: async () => ({}),
+        promptAsync: async (body: PromptAsyncBody) => {
+          promptBodies.push(body)
+          return { data: {} }
+        },
+        abort: async () => ({}),
+        messages: async () => ({ data: [] }),
+        status: async () => ({ data: {} }),
+      },
+    }
+    manager.shutdown()
+    manager = new BackgroundManager({ pluginContext: createPluginInput(client) })
+
+    const parentSessionID = "parent-double-sweep"
+    const task = createMockTask({
+      id: "task-double-sweep",
+      parentSessionId: parentSessionID,
+      status: "completed",
+      completedAt: new Date(),
+    })
+    getTaskMap(manager).set(task.id, task)
+    getPendingByParent(manager).set(parentSessionID, new Set([task.id]))
+
+    // when — two reconciliations enqueue the recovery op twice synchronously,
+    // before either queued op gets a microtask to execute
+    manager.handleEvent({ type: "session.idle", properties: { sessionID: parentSessionID } })
+    manager.handleEvent({ type: "session.idle", properties: { sessionID: parentSessionID } })
+    await waitForCoalescedFlush(manager, parentSessionID)
+    await waitUntil(() => getDispatchedParentWakes(manager).has(parentSessionID), 600)
+
+    // then — delivery happened once; the duplicate op hit the guard
+    expect(getPendingByParent(manager).get(parentSessionID)).toBeUndefined()
+    expect(promptBodies.filter(body => body.body?.noReply === false)).toHaveLength(1)
+  })
+
   test("#given a sibling errors while another completes #when the error path runs #then pendingByParent is not emptied outside the serialized notification queue", async () => {
     // given
     let capturedOperation: (() => Promise<void>) | undefined
