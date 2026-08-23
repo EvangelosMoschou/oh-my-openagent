@@ -253,6 +253,7 @@ export class BackgroundManager {
   private pendingNotifications: Map<string, string[]>
   private pendingByParent: Map<string, Set<string>>  // Track pending tasks per parent for batching
   private notifiedTasks = new Set<string>()  // Tasks whose notifyParentSession actually executed (#6546)
+  private replyWakeOwedByTask = new Map<string, string>()  // taskId -> parent with a queued reply-required wake not yet durably dispatched/tracked (#6546)
   private client: OpencodeClient
   private directory: string
   private pollingInterval?: ReturnType<typeof setInterval>
@@ -1345,6 +1346,7 @@ The fallback retry session is now created and can be inspected directly.
     existingTask.error = undefined
     // Resume reopens a terminal task (#6546): clear the delivery guard so its next completion notifies again.
     this.notifiedTasks.delete(existingTask.id)
+    this.replyWakeOwedByTask.delete(existingTask.id)
     this.updateTaskParent(existingTask, input.parentSessionId)
     existingTask.parentMessageId = input.parentMessageId
     existingTask.parentModel = input.parentModel
@@ -2345,10 +2347,43 @@ The task was re-queued on a fallback model after a retryable failure.
    * Membership in `notifications` marks an ENQUEUED op, not a DELIVERED one,
    * so it must not suppress the retry; `notifiedTasks` is the delivery truth.
    */
+  /**
+   * Round-3 backstop for #6546: a task whose reply-required wake was queued
+   * and then lost downstream (e.g. dropAdmittedWakeConsumedByParent) has no
+   * pending wake, no dispatched-tracked wake, and no in-flight dispatch - all
+   * three live-delivery signals are gone while the ledger still says owed.
+   * Re-arm the delivery guard and re-run notify for that task so the wake is
+   * rebuilt; queueWake merges identical notifications, so this is safe even
+   * if the original wake reappears.
+   */
+  private sweepLostReplyWakes(parentSessionID: string, excludeTaskId?: string): void {
+    for (const [taskId, owedParent] of [...this.replyWakeOwedByTask]) {
+      if (owedParent !== parentSessionID || taskId === excludeTaskId) continue
+      const task = this.tasks.get(taskId)
+      if (!task || task.status === "running" || task.status === "pending") continue
+      const liveDelivery =
+        this.parentWakeNotifier.getPendingParentWakes().has(parentSessionID) ||
+        this.parentWakeNotifier.getDispatchedParentWakes().has(parentSessionID) ||
+        this.parentWakeNotifier.hasInFlightParentWakeDispatch(parentSessionID)
+      if (liveDelivery) continue
+      log("[background-agent] Reply-required wake lost after notify; retrying:", {
+        taskId,
+        parentSessionID,
+      })
+      this.replyWakeOwedByTask.delete(taskId)
+      this.notifiedTasks.delete(taskId)
+      this.markForNotification(task)
+      void this.enqueueNotificationForParent(parentSessionID, () => this.notifyParentSession(task)).catch(err => {
+        log("[background-agent] Error in lost-wake retry:", { taskId, error: err })
+      })
+    }
+  }
+
   private reconcilePendingParentNotifications(
     parentSessionID: string,
     options?: { excludeTaskId?: string }
   ): void {
+    this.sweepLostReplyWakes(parentSessionID, options?.excludeTaskId)
     const pending = this.pendingByParent.get(parentSessionID)
     if (!pending || pending.size === 0) return
     for (const taskId of [...pending]) {
@@ -2402,6 +2437,7 @@ The task was re-queued on a fallback model after a retryable failure.
 
       this.clearNotificationsForTask(taskId)
       this.notifiedTasks.delete(taskId)
+      this.replyWakeOwedByTask.delete(taskId)
       this.removeTask(task)
       this.clearTaskHistoryWhenParentTasksGone(task.parentSessionId)
       if (task.sessionId) {
@@ -2688,13 +2724,19 @@ The task was re-queued on a fallback model after a retryable failure.
     if (!this.completedTaskSummaries.has(task.parentSessionId)) {
       this.completedTaskSummaries.set(task.parentSessionId, [])
     }
-    this.completedTaskSummaries.get(task.parentSessionId)!.push({
-      id: task.id,
-      description: task.description,
-      status: task.status,
-      error: task.error,
-      attempts: cloneAttempts(task),
-    })
+    // Upsert by id: a #6546 lost-wake retry re-runs this method for the same
+    // task, and a duplicate summary would render twice in the merged wake.
+    const taskSummaries = this.completedTaskSummaries.get(task.parentSessionId)!
+    const existingSummaryIndex = taskSummaries.findIndex(summary => summary.id === task.id)
+    if (existingSummaryIndex === -1) {
+      taskSummaries.push({
+        id: task.id,
+        description: task.description,
+        status: task.status,
+        error: task.error,
+        attempts: cloneAttempts(task),
+      })
+    }
 
     // Update pending tracking and check if all tasks complete
     const pendingSet = this.pendingByParent.get(task.parentSessionId)
@@ -2749,6 +2791,16 @@ The task was re-queued on a fallback model after a retryable failure.
 
         const isTaskFailure = task.status === "error" || task.status === "cancelled" || task.status === "interrupt"
         const shouldReply = allComplete || isTaskFailure
+
+        // A queued reply-required wake is still owed until it is durably
+        // dispatched or tracked (#6546 round 3): pendingByParent and
+        // notifiedTasks are both already cleared by this point, so without
+        // this ledger a deferred-then-dropped wake would be unretryable.
+        if (shouldReply) {
+          this.replyWakeOwedByTask.set(task.id, task.parentSessionId)
+        } else {
+          this.replyWakeOwedByTask.delete(task.id)
+        }
 
         const shouldDeferNotification = await this.isSessionActive(task.parentSessionId)
 
@@ -3260,6 +3312,7 @@ The task was re-queued on a fallback model after a retryable failure.
     this.pendingNotifications.clear()
     this.pendingByParent.clear()
     this.notifiedTasks.clear()
+    this.replyWakeOwedByTask.clear()
     this.notificationQueueByParent.clear()
     this.rootDescendantCounts.clear()
     this.queuesByKey.clear()
