@@ -198,6 +198,7 @@ export class ParentWakeFlushRunner {
     }
     this.deps.pendingQueue.deleteWake(sessionID)
     this.deps.dispatchedTracker.clearWake(sessionID)
+    this.deps.notifierDeps.onAdmittedWakeConsumed?.(sessionID)
     log("[background-agent] Dropped retained parent wake after parent consumed admitted notification:", { sessionID })
     return true
   }

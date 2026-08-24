@@ -315,6 +315,7 @@ export class BackgroundManager {
         enqueueNotificationForParent: this.enqueueNotificationForParent.bind(this),
         onPendingWakeRequeued: (sessionID) => this.updateBackgroundTaskMarker(sessionID),
         onScheduledFlushSettled: (sessionID) => this.recordScheduledFlushSettled(sessionID),
+        onAdmittedWakeConsumed: (sessionID) => this.acknowledgeReplyWakesForParent(sessionID),
       },
       {
         pendingRetryMs: PENDING_PARENT_WAKE_RETRY_MS,
@@ -1549,6 +1550,14 @@ The fallback retry session is now created and can be inspected directly.
     this.parentWakeNotifier.clearDispatchedParentWake(sessionID)
   }
 
+  private acknowledgeReplyWakesForParent(parentSessionID: string): void {
+    for (const [taskId, owedParent] of [...this.replyWakeOwedByTask]) {
+      if (owedParent === parentSessionID) {
+        this.replyWakeOwedByTask.delete(taskId)
+      }
+    }
+  }
+
   private async requeueDispatchedParentWake(sessionID: string, reason: string): Promise<boolean> {
     return this.parentWakeNotifier.requeueDispatchedParentWake(sessionID, reason)
   }
@@ -1646,6 +1655,7 @@ The fallback retry session is now created and can be inspected directly.
 
       if (messageUpdatedInfoHasParentWakeOutput(info, role)) {
         this.clearDispatchedParentWake(sessionID)
+        this.acknowledgeReplyWakesForParent(sessionID)
       }
 
       if (role === "tool") {
@@ -1696,6 +1706,7 @@ The fallback retry session is now created and can be inspected directly.
         && !holdDispatchedWakeForTextDelta
       if (hasParentWakeOutput) {
         this.clearDispatchedParentWake(sessionID)
+        this.acknowledgeReplyWakesForParent(sessionID)
       }
       if (!isUserPart && !isInternalWakePart && !holdDispatchedWakeForTextDelta) {
         this.parentWakeNotifier.recordParentSessionActivity(sessionID)

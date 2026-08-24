@@ -3134,6 +3134,90 @@ describe("BackgroundManager.tryCompleteTask", () => {
     expect(alphaMentions).toBe(1)
   })
 
+  test("#given a successful wake dispatch is consumed #when a sibling transitions or parent goes idle #then no duplicate wake is rebuilt", async () => {
+    // given — a reply-required wake is queued, flushed, and then conclusively consumed
+    type PromptAsyncBody = Record<string, unknown> & { noReply?: boolean }
+    const promptBodies: PromptAsyncBody[] = []
+    const client = {
+      session: {
+        prompt: async () => ({}),
+        promptAsync: async (body: PromptAsyncBody) => {
+          promptBodies.push(body)
+          return { data: {} }
+        },
+        abort: async () => ({}),
+        messages: async () => ({ data: [] }),
+        status: async () => ({ data: {} }),
+      },
+    }
+    manager.shutdown()
+    manager = new BackgroundManager({ pluginContext: createPluginInput(client) })
+
+    const parentSessionID = "parent-round4-success-ack"
+    const consumedTask = createMockTask({
+      id: "task-round4-alpha",
+      parentSessionId: parentSessionID,
+      status: "error",
+      error: "boom",
+      completedAt: new Date(),
+      description: "ROUND4-ALPHA-MARKER",
+    })
+    const siblingTask = createMockTask({
+      id: "task-round4-beta",
+      sessionId: "session-round4-beta",
+      parentSessionId: parentSessionID,
+      status: "running",
+      description: "ROUND4-BETA-MARKER",
+    })
+    getTaskMap(manager).set(consumedTask.id, consumedTask)
+    getTaskMap(manager).set(siblingTask.id, siblingTask)
+    getPendingByParent(manager).set(parentSessionID, new Set([siblingTask.id]))
+
+    // when — notify runs for alpha, the wake is dispatched, then parent output consumes it
+    await (cast<{ notifyParentSession(task: typeof consumedTask): Promise<void> }>(manager)).notifyParentSession(consumedTask)
+    await waitUntil(() => getDispatchedParentWakes(manager).has(parentSessionID), 600)
+    expect(promptBodies.filter(body => body.body?.noReply === false)).toHaveLength(1)
+    const replyLedger = (cast<{ replyWakeOwedByTask: Map<string, string> }>(manager)).replyWakeOwedByTask
+    expect(replyLedger.has(consumedTask.id)).toBe(true)
+
+    // @allow simulate conclusive consumption: parent assistant turn produced output after the wake (clears dispatched + acks ledger)
+    manager.handleEvent({
+      type: "message.updated",
+      properties: {
+        sessionID: parentSessionID,
+        info: { role: "assistant", finish: "stop", tokens: { input: 10, output: 10 } },
+      },
+    })
+    expect(getDispatchedParentWakes(manager).has(parentSessionID)).toBe(false)
+    expect(replyLedger.has(consumedTask.id)).toBe(false)
+    // @allow clear recent-activity window set by consumption — otherwise sibling flush defers via admit-only path and races the 2s window; ledger ack already proven
+    const inspector = (cast<{
+      parentWakeNotifier: { sessionInspector: { recentParentSessionActivity: Map<string, number> } }
+    }>(manager)).parentWakeNotifier.sessionInspector
+    inspector.recentParentSessionActivity.delete(parentSessionID)
+    // @allow isolate summary so sibling wake does not embed alpha via leftover merge
+    ;(cast<{ completedTaskSummaries: Map<string, unknown[]> }>(manager))
+      .completedTaskSummaries.get(parentSessionID)?.splice(0)
+
+    // and — sibling transitions to terminal (no parent event), which would rebuild a LOST wake but must not rebuild a CONSUMED one
+    const completed = await tryCompleteTaskForTest(manager, siblingTask)
+    expect(completed).toBe(true)
+    await new Promise(resolve => setTimeout(resolve, 400))
+    await waitForCoalescedFlush(manager, parentSessionID)
+    await waitUntil(() => getDispatchedParentWakes(manager).has(parentSessionID), 800)
+    const deliveredText = JSON.stringify(promptBodies)
+    const alphaMentions = deliveredText.split("ROUND4-ALPHA-MARKER").length - 1
+    const betaMentions = deliveredText.split("ROUND4-BETA-MARKER").length - 1
+    // then — alpha was delivered exactly once (the original dispatch), sibling exactly once, no duplicate rebuild
+    expect(alphaMentions).toBe(1)
+    expect(betaMentions).toBe(1)
+    expect(replyLedger.has(consumedTask.id)).toBe(false)
+    // Also verify via parent idle reconciliation path does not resurrect the consumed wake
+    manager.handleEvent({ type: "session.idle", properties: { sessionID: parentSessionID } })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(JSON.stringify(promptBodies).split("ROUND4-ALPHA-MARKER").length - 1).toBe(1)
+  })
+
   test("#given a sibling errors while another completes #when the error path runs #then pendingByParent is not emptied outside the serialized notification queue", async () => {
     // given
     let capturedOperation: (() => Promise<void>) | undefined
