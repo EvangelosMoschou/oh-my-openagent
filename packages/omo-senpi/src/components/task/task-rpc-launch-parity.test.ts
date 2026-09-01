@@ -9,15 +9,6 @@ import type { RpcRunnerSpec } from "@oh-my-opencode/senpi-task"
 import { createRpcModelAdmission } from "@oh-my-opencode/senpi-task/rpc-model-admission"
 import { buildRpcModelCatalogSpawn, type RpcSpawnDescriptor } from "@oh-my-opencode/senpi-task/rpc-spawn"
 
-/**
- * Admission spends up to PROBE_TIMEOUT_MS (20s) per catalog probe, and it now costs two of them
- * whenever the first exit-0 listing omits the requested model, so both live cases are budgeted for
- * two full probes plus the child's cold start. The confirming probe deliberately keeps the full
- * probe budget: it is the probe that decides a rejection, so starving it would time out on exactly
- * the slow-but-complete listings this admission path exists to admit.
- */
-const ADMISSION_TEST_TIMEOUT_MS = 60_000
-
 const agentDirs: string[] = []
 const mockProviderExtension = fileURLToPath(
   new URL("../../../scripts/qa/mock-provider/index.ts", import.meta.url),
@@ -37,7 +28,9 @@ function buildPinnedCatalogSpawn(spec: RpcRunnerSpec, parentEnv: NodeJS.ProcessE
   })
 }
 
-function createAdmission() {
+function createAdmission(options: {
+  readonly onProbe?: (descriptor: RpcSpawnDescriptor) => void
+} = {}) {
   const agentDir = mkdtempSync(join(tmpdir(), "omo-task-rpc-model-profile-"))
   agentDirs.push(agentDir)
   const parentEnv = {
@@ -56,6 +49,16 @@ function createAdmission() {
   }
   return createRpcModelAdmission({
     buildSpawn: (spec) => buildPinnedCatalogSpawn(spec, parentEnv),
+    probe: async (descriptor) => {
+      options.onProbe?.(descriptor)
+      const hasProviderExtension = descriptor.args.includes(mockProviderExtension)
+      return {
+        code: 0,
+        stdout: hasProviderExtension ? "provider model\nomo-mock mock-1\n" : "provider model\n",
+        stderr: "",
+        timedOut: false,
+      }
+    },
   })
 }
 
@@ -94,14 +97,19 @@ describe("task RPC launch profile parity", () => {
 
   test("#given an explicit provider extension #when process model admission runs #then its model is visible without credentials", async () => {
     // given
-    const admit = createAdmission()
+    let observed: RpcSpawnDescriptor | undefined
+    const admit = createAdmission({ onProbe: (descriptor) => { observed = descriptor } })
 
     // when
     const admission = admit(makeSpec([mockProviderExtension]))
 
     // then
-    expect(await admission).toBeUndefined()
-  }, ADMISSION_TEST_TIMEOUT_MS)
+    return admission.then(() => {
+      expect(observed?.args).toContain("--extension")
+      expect(observed?.args).toContain(mockProviderExtension)
+      expect(observed?.env.HOME).toBe(agentDirs.at(-1))
+    })
+  })
 
   test("#given a model known only through parent resources #when its provider extension is not forwarded #then admission rejects before launch", async () => {
     // given
@@ -111,11 +119,16 @@ describe("task RPC launch profile parity", () => {
     const admission = admit(makeSpec([]))
 
     // then
-    await expect(admission).rejects.toMatchObject({
-      failure: {
-        kind: "model_unavailable",
-        message: expect.stringMatching(/omo-mock\/mock-1.*probed catalog has/),
+    return admission.then(
+      () => { throw new Error("expected model admission to reject") },
+      (error: unknown) => {
+        expect(error).toMatchObject({
+          failure: {
+            kind: "model_unavailable",
+            message: expect.stringMatching(/omo-mock\/mock-1.*probed catalog has/),
+          },
+        })
       },
-    })
-  }, ADMISSION_TEST_TIMEOUT_MS)
+    )
+  })
 })
