@@ -72,6 +72,37 @@ describe("resolveModelForDelegateTask", () => {
     expect(result).toEqual({ model: "opencode-go/kimi-k3" })
   })
 
+  test("#given an alias-inconclusive primary and an exactly reachable fallback #when the primary is present under a provider alias #then the explicit primary still wins", () => {
+    // The primary opencode-go/kimi-k3 is available under the opencode provider
+    // alias (opencode/kimi-k3) — fuzzyMatchModel with the opencode-go hint
+    // returns null (inconclusive), but the primary IS present. The reachable
+    // fallback must NOT be promoted: unavailability must be positively
+    // established, and a provider-alias edge is not absence (#6869).
+    const result = resolveModelForDelegateTask({
+      userModel: "opencode-go/kimi-k3",
+      userFallbackModels: ["opencode/qwen3.7-plus"],
+      availableModels: new Set(["opencode/kimi-k3", "opencode/qwen3.7-plus"]),
+    }, noCacheDeps)
+
+    expect(result).toEqual({ model: "opencode-go/kimi-k3" })
+  })
+
+  test("#given an alias-inconclusive primary that is verifiably absent #when a fallback is exactly reachable #then the fallback is promoted", () => {
+    // The primary opencode-go/kimi-k3 is NOT present in the available set in
+    // any form (neither exact nor fuzzy without the hint), so unavailability
+    // is positively established — the reachable fallback is promoted.
+    const result = resolveModelForDelegateTask({
+      userModel: "opencode-go/kimi-k3",
+      userFallbackModels: ["opencode/qwen3.7-plus"],
+      availableModels: new Set(["opencode/qwen3.7-plus"]),
+    }, noCacheDeps)
+
+    expect(result).toEqual({
+      model: "opencode/qwen3.7-plus",
+      matchedFallback: true,
+    })
+  })
+
   test("#given connected providers cache #when fallback chain starts disconnected #then selects first connected provider", () => {
     const result = resolveModelForDelegateTask({
       availableModels: new Set(),
