@@ -1,4 +1,5 @@
 import type { AgentOverrides } from "../../config/schema"
+import type { DelegatedModelConfig } from "./types"
 import { getAgentConfigKey } from "../../shared/agent-display-names"
 import { fuzzyMatchModel } from "../../shared/model-availability"
 import { buildFallbackChainFromModels } from "../../shared/fallback-chain-from-models"
@@ -23,6 +24,33 @@ function findAgentOverride(agentOverrides: AgentOverrides | undefined, agentConf
 function modelStringFromEntry(entry: string | { model: string } | undefined): string | undefined {
   if (typeof entry === "string") return entry
   return entry?.model
+}
+
+/**
+ * The first `models[]` entry is the primary. When it is an object it carries
+ * per-model settings (reasoning/reasoningEffort/temperature/top_p/maxTokens/
+ * thinking) that must be preserved — extracting only `entry.model` silently
+ * drops the rest of the contract (#6869 review). Returns the base config with
+ * the object's settings merged in, or the base untouched when the entry is a
+ * plain string.
+ */
+function applyPrimaryEntrySettings(
+  base: DelegatedModelConfig,
+  entry: string | { model: string; reasoning?: string; variant?: string; reasoningEffort?: string; temperature?: number; top_p?: number; maxTokens?: number; thinking?: { type: "enabled" | "disabled"; budgetTokens?: number } },
+): DelegatedModelConfig {
+  if (typeof entry === "string" || entry === undefined) {
+    return base
+  }
+  return {
+    ...base,
+    ...(entry.reasoning !== undefined ? { reasoning: entry.reasoning } : {}),
+    ...(entry.variant !== undefined ? { variant: entry.variant } : {}),
+    ...(entry.reasoningEffort !== undefined ? { reasoningEffort: entry.reasoningEffort } : {}),
+    ...(entry.temperature !== undefined ? { temperature: entry.temperature } : {}),
+    ...(entry.top_p !== undefined ? { top_p: entry.top_p } : {}),
+    ...(entry.maxTokens !== undefined ? { maxTokens: entry.maxTokens } : {}),
+    ...(entry.thinking !== undefined ? { thinking: entry.thinking } : {}),
+  }
 }
 
 export async function resolveSubagentModel(
@@ -89,6 +117,15 @@ export async function resolveSubagentModel(
           model: explicitModel,
         })
       }
+    }
+
+    // Preserve the full models[0] contract: when the primary entry is an
+    // object, its per-model settings (reasoning, temperature, thinking, …)
+    // must survive resolution instead of being dropped (#6869 review). The
+    // primary entry is the most specific source, so it overrides category
+    // params applied above.
+    if (categoryModel && typeof canonicalAgentModels?.[0] === "object") {
+      categoryModel = applyPrimaryEntrySettings(categoryModel, canonicalAgentModels[0])
     }
 
     const defaultProviderID = categoryModel?.providerID
